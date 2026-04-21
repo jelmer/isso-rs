@@ -3,6 +3,9 @@
 //! Schema version: MAX_VERSION = 5. A fresh DB is stamped directly at v5;
 //! existing DBs from the Python server run the v0→v5 migration chain.
 
+pub mod comments;
+pub mod threads;
+
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite, SqlitePool};
 use std::str::FromStr;
