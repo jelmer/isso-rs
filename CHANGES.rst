@@ -1,6 +1,63 @@
 Changelog for Isso
 ==================
 
+Unreleased
+----------
+
+Rust port
+^^^^^^^^^
+
+The server component has been rewritten in Rust. The deployment binary is
+``isso-rs``; the SQLite on-disk format is unchanged (existing databases
+open in place) and the JSON HTTP API plus the JavaScript frontend remain
+compatible.
+
+- Replace the Python/WSGI runtime with ``axum`` on ``tokio``. The
+  ``isso.run``, ``isso.dispatch``, gunicorn/uWSGI/gevent entry points are
+  gone; ``isso-rs`` binds its own TCP or Unix socket. (jelmer)
+- Port every data-access and HTTP endpoint 1:1 to Rust with
+  wire-compatibility tests asserting schema + byte-level parity for the
+  ``voters`` bloomfilter, PBKDF2 hash output, and itsdangerous cookie
+  signatures.
+- Port SMTP + stdout notifications (``lettre`` with rustls+ring); reply
+  fanout now emits a ``List-Unsubscribe`` header per recipient.
+- Port the admin UI (``minijinja`` rendering the original Jinja2
+  templates) and Disqus/WordPress/generic-JSON importers
+  (``isso-rs import --type=auto <dump>``).
+- Harden Markdown rendering: ``pulldown-cmark`` + ``ammonia`` replace
+  ``mistune`` + ``bleach``; XSS invariants (script/onload/img stripping)
+  are asserted in tests.
+- Tighten ``X-Forwarded-For`` handling: when ``[server] trusted-proxies``
+  is empty we now ignore XFF entirely (was: took the leftmost hop
+  unconditionally). When set, walk right-to-left stripping trusted hops,
+  matching werkzeug's ``access_route`` semantics.
+- Honour ``X-Forwarded-Host`` / ``X-Forwarded-Proto`` /
+  ``X-Forwarded-Prefix`` when reconstructing the external URL for admin
+  and moderation links (previous werkzeug ``ProxyFix(x_prefix=1)``
+  behaviour).
+- Add a periodic-purge tokio task when ``[moderation] enabled``, running
+  ``comments.purge`` every ``purge-after`` interval.
+- Serve static assets (``/js``, ``/css``, ``/img``, ``/demo``) from
+  ``[server] static-dir`` via ``tower-http`` when set.
+- Docker: three-stage musl build — Node for the JS bundles, Rust for the
+  binary, Alpine runtime image.
+- Reorganised on-disk layout: ``isso/`` → ``isso-rs/``, Python-style
+  ``templates/`` → ``isso-rs/templates/``, JS/CSS/img/demo →
+  ``isso-rs/static/``.
+
+Documented divergences from the Python implementation:
+
+- itsdangerous zlib-compressed cookies are valid DEFLATE but not
+  byte-identical (different encoder). Python and Rust decode each
+  other's tokens correctly.
+- ``minijinja`` auto-escapes ``/`` in admin-HTML templates as
+  ``&#x2f;`` where Jinja2 emits a literal ``/``. Both render identically
+  in browsers.
+- Gravatar URL rendering uses MD5 specifically (as Gravatar requires),
+  regardless of the configured ``[hash] algorithm``.
+- ``datetimeformat`` in the admin UI renders timestamps in UTC. Python's
+  ``datetime.fromtimestamp`` used the server's local timezone.
+
 0.14.0 (2026-03-26)
 --------------------
 
