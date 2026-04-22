@@ -1,9 +1,29 @@
 [package]
-name = "isso-rs"
+name = "isso"
 version = "0.1.0"
 edition = "2021"
-description = "Rust port of the Isso comment server"
+description = "A lightweight, self-hosted commenting service"
 license = "MIT"
+repository = "https://github.com/jelmer/isso-rs"
+homepage = "https://github.com/jelmer/isso-rs"
+readme = "../README.md"
+keywords = ["comments", "isso", "sqlite", "axum"]
+categories = ["web-programming::http-server"]
+# Exclude frontend test scaffolding from the published crate. The JS
+# bundles themselves are kept — the admin UI references them — but jest
+# configs, unit/integration test sources, and reference screenshots are
+# only useful from a git checkout.
+exclude = [
+    "static/js/tests/**",
+    "static/js/jest-*.config.js",
+]
+
+[lib]
+# The package is published as "isso" on crates.io but the Rust lib name
+# stays "isso_rs" so existing `use isso_rs::...` paths in tests and main.rs
+# keep working without a bulk rename.
+name = "isso_rs"
+path = "src/lib.rs"
 
 [[bin]]
 name = "isso-rs"

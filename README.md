@@ -1,11 +1,13 @@
-# Isso – a commenting server similar to Disqus (Rust port)
+# Isso – a commenting server similar to Disqus
 
-Isso – *Ich schrei sonst* – is a lightweight commenting server. This branch
-is a Rust reimplementation of the upstream Python project; the server binary
-is `isso-rs`, the SQLite database format is unchanged, and the JSON HTTP API
-and JavaScript frontend remain compatible with the Python server.
+Isso – *Ich schrei sonst* – is a lightweight commenting server. This
+repository is a Rust reimplementation of the original
+[Python project](https://github.com/isso-comments/isso); the server binary
+is `isso-rs`, the SQLite database format is unchanged, and the JSON HTTP
+API and JavaScript frontend remain compatible with the Python server.
 
-Upstream project (Python): [isso-comments/isso](https://github.com/isso-comments/isso).
+- Crate: [`isso` on crates.io](https://crates.io/crates/isso)
+- Repository: [github.com/jelmer/isso-rs](https://github.com/jelmer/isso-rs)
 
 ## Features
 
@@ -23,7 +25,23 @@ Upstream project (Python): [isso-comments/isso](https://github.com/isso-comments
 
 ## Getting started
 
-### From source
+### Via `cargo install` (released version, no checkout required)
+
+```console
+$ cargo install isso
+```
+
+Drops the binary in `~/.cargo/bin/isso-rs`. The admin UI still needs the
+`templates/` and (optionally) `static/` trees — clone the repo or copy
+those directories alongside wherever you deploy the binary.
+
+### From git (latest development version)
+
+```console
+$ cargo install --git https://github.com/jelmer/isso-rs --bin isso-rs
+```
+
+### From a checkout
 
 ```console
 $ cd isso-rs
@@ -92,8 +110,10 @@ $ cargo test
 
 ## Contributing
 
-Changes to the Python upstream welcome; changes specific to this port should
-stay in the `isso-rs/` tree. The `rust` branch is where this work lives.
+Issues and pull requests welcome at
+[github.com/jelmer/isso-rs](https://github.com/jelmer/isso-rs). Frontend JS
+lives under `isso-rs/static/js/`; the Rust crate sources live under
+`isso-rs/src/`.
 
 ## License
 
