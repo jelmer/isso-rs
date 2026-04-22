@@ -372,10 +372,18 @@ pub async fn new_comment(
             } else {
                 crate::thread_title::fetch(&state.config.general.hosts, &q.uri)
                     .await
-                    .ok_or_else(|| {
+                    .map_err(|e| {
+                        // Surface the per-host error reasons in the 400 so the
+                        // operator doesn't have to tail the server log to see
+                        // what went wrong (DNS, TLS, timeout, 4xx/5xx, etc.).
+                        tracing::warn!(
+                            "POST /new: title fetch for {} failed: {}",
+                            q.uri,
+                            e
+                        );
                         ApiError::BadRequest(format!(
-                            "Cannot create new thread: URI {} is not accessible and no title was provided. Please provide a title parameter in your request.",
-                            q.uri
+                            "Cannot create new thread: URI {} is not accessible and no title was provided ({}). Please provide a title parameter in your request.",
+                            q.uri, e
                         ))
                     })?
             };

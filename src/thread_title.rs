@@ -29,14 +29,39 @@ pub struct ResolvedThread {
 
 pub const DEFAULT_TITLE: &str = "Untitled.";
 
+/// Outcome of a [`fetch`] attempt. On success, carries the resolved thread
+/// metadata. On failure, carries human-readable per-host error lines so the
+/// handler can surface them in its 400 response (operators troubleshooting a
+/// "not accessible" error don't otherwise have visibility into why).
+#[derive(Debug)]
+pub enum FetchError {
+    /// The HTTP client itself failed to initialise (TLS, resolver, etc.).
+    ClientInit(String),
+    /// Every configured host refused or errored. Each entry is one hop.
+    AllHostsFailed(Vec<String>),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::ClientInit(e) => write!(f, "HTTP client init failed: {e}"),
+            FetchError::AllHostsFailed(errs) => {
+                write!(f, "every configured host failed: {}", errs.join("; "))
+            }
+        }
+    }
+}
+
 /// GET `{host}{uri}` and parse the response body for a thread title.
 /// Tries each host in order; first successful response wins.
 ///
-/// Returns `None` if every host errors out. Callers should fall back to the
-/// URI itself or surface a 400 in that case — matching Python's behaviour,
-/// which bubbled the curl error up to the handler.
-pub async fn fetch(hosts: &[String], uri: &str) -> Option<ResolvedThread> {
-    let client = reqwest::Client::builder()
+/// Logs one `info` line on success and one `warn` line per host failure
+/// so operators can see where the fallback is breaking without having to
+/// enable debug logs. On total failure, returns a [`FetchError`] whose
+/// `Display` impl carries the per-host error reasons for the handler to
+/// surface in its 400 response body.
+pub async fn fetch(hosts: &[String], uri: &str) -> Result<ResolvedThread, FetchError> {
+    let client = match reqwest::Client::builder()
         .user_agent(concat!(
             "Isso/",
             env!("CARGO_PKG_VERSION"),
@@ -45,33 +70,53 @@ pub async fn fetch(hosts: &[String], uri: &str) -> Option<ResolvedThread> {
         .redirect(reqwest::redirect::Policy::limited(3))
         .timeout(std::time::Duration::from_secs(3))
         .build()
-        .ok()?;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("thread-title fetch: client init failed: {e}");
+            return Err(FetchError::ClientInit(e.to_string()));
+        }
+    };
 
+    let mut failures: Vec<String> = Vec::new();
     for host in hosts {
         let url = match join_host_uri(host, uri) {
             Some(u) => u,
-            None => continue,
+            None => {
+                failures.push(format!("{host:?}: malformed host"));
+                continue;
+            }
         };
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let body = match resp.text().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::debug!("body read failed for {url}: {e}");
-                        continue;
+                let status = resp.status();
+                match resp.text().await {
+                    Ok(body) => {
+                        let resolved = extract_title(&body, uri);
+                        tracing::info!(
+                            "thread-title fetch: resolved {uri} via {url} ({status}): title={:?}",
+                            resolved.title
+                        );
+                        return Ok(resolved);
                     }
-                };
-                return Some(extract_title(&body, uri));
+                    Err(e) => {
+                        tracing::warn!("thread-title fetch: body read failed for {url}: {e}");
+                        failures.push(format!("{url}: body read failed: {e}"));
+                    }
+                }
             }
             Ok(resp) => {
-                tracing::debug!("GET {url}: status {}", resp.status());
+                let status = resp.status();
+                tracing::warn!("thread-title fetch: GET {url} returned {status}");
+                failures.push(format!("{url}: HTTP {status}"));
             }
             Err(e) => {
-                tracing::debug!("GET {url} failed: {e}");
+                tracing::warn!("thread-title fetch: GET {url} failed: {e}");
+                failures.push(format!("{url}: {e}"));
             }
         }
     }
-    None
+    Err(FetchError::AllHostsFailed(failures))
 }
 
 /// Join a configured host (e.g. `https://example.com/` or

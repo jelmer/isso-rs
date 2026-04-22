@@ -67,12 +67,12 @@ async fn fetch_reads_data_title_from_live_server() {
     )
     .await;
     let hosts = vec![blog];
-    let got = thread_title::fetch(&hosts, "/article.html").await;
+    let got = thread_title::fetch(&hosts, "/article.html").await.unwrap();
     let expected = thread_title::ResolvedThread {
         uri: "/article.html".into(),
         title: "Thread from data-title".into(),
     };
-    assert_eq!(got, Some(expected));
+    assert_eq!(got, expected);
 }
 
 #[tokio::test]
@@ -88,20 +88,28 @@ async fn fetch_falls_back_to_nearest_h1_when_no_data_title() {
     )
     .await;
     let hosts = vec![blog];
-    let got = thread_title::fetch(&hosts, "/article.html").await;
+    let got = thread_title::fetch(&hosts, "/article.html").await.unwrap();
     let expected = thread_title::ResolvedThread {
         uri: "/article.html".into(),
         title: "The article's own heading".into(),
     };
-    assert_eq!(got, Some(expected));
+    assert_eq!(got, expected);
 }
 
 #[tokio::test]
-async fn fetch_returns_none_when_no_host_answers() {
+async fn fetch_returns_err_when_no_host_answers() {
     // 127.0.0.1:1 — reserved low port, nothing ever listens there.
     let hosts = vec!["http://127.0.0.1:1".into()];
-    let got = thread_title::fetch(&hosts, "/article.html").await;
-    assert_eq!(got, None);
+    let err = thread_title::fetch(&hosts, "/article.html")
+        .await
+        .expect_err("expected every-host-failed error");
+    // The error string should carry the URL so operators can tell which
+    // host path was attempted.
+    let msg = err.to_string();
+    assert!(
+        msg.contains("127.0.0.1:1/article.html"),
+        "expected URL in error message, got: {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
