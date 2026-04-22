@@ -42,10 +42,14 @@ impl AppState {
                 .fetch_one(&db)
                 .await?;
         let hasher = Hasher::from_config(&config.hash.algorithm, &config.hash.salt)?;
+        let renderer = Renderer::with_allowlist(
+            &config.markup.allowed_elements,
+            &config.markup.allowed_attributes,
+        );
         Ok(Self {
             signer: Arc::new(Signer::new(session_key.as_bytes())),
             hasher: Arc::new(hasher),
-            renderer: Arc::new(Renderer::new()),
+            renderer: Arc::new(renderer),
             db,
             config: Arc::new(config),
         })
