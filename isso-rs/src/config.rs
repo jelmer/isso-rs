@@ -58,6 +58,11 @@ pub struct Server {
     pub profile: bool,
     pub trusted_proxies: Vec<String>,
     pub samesite: Option<String>,
+    /// Directory containing the static assets (js/, css/, img/, demo/) the
+    /// admin HTML and the JS client reference. Empty string = no static
+    /// serving (useful if a reverse proxy hosts the assets). Defaults to
+    /// the `static/` sibling of the working directory.
+    pub static_dir: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -134,6 +139,7 @@ impl Default for Config {
                 profile: false,
                 trusted_proxies: Vec::new(),
                 samesite: None,
+                static_dir: "static".into(),
             },
             smtp: Smtp {
                 host: "localhost".into(),
@@ -272,6 +278,9 @@ impl Config {
             if let Some(v) = s.get("samesite") {
                 let v = v.trim();
                 self.server.samesite = if v.is_empty() { None } else { Some(v.into()) };
+            }
+            if let Some(v) = s.get("static-dir") {
+                self.server.static_dir = v.into();
             }
         }
         if let Some(s) = ini.section(Some("smtp")) {

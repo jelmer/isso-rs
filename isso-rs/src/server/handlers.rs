@@ -70,6 +70,16 @@ pub async fn config_endpoint(State(state): State<AppState>) -> Json<PublicConfig
     Json(PublicConfig::from_state(&state))
 }
 
+/// `GET /info` — liveness/version endpoint. Python exposed it via
+/// `isso.views.Info`; deployments use it as a healthcheck probe
+/// (docker-compose.yml → `wget $ISSO_ENDPOINT/info`).
+pub async fn info() -> Json<Value> {
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "impl": "isso-rs",
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct NewQuery {
     uri: String,

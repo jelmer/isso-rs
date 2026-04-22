@@ -99,12 +99,31 @@ fn maybe_spawn_purge(state: &AppState) {
 /// Router assembly extracted so tests can build a router against an
 /// arbitrary AppState (e.g. with an in-memory SQLite DB).
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(handlers::fetch))
+    let mut r = Router::new();
+
+    // Static assets (js/css/img/demo) are mounted when [server] static-dir
+    // points at a readable directory. Operators running behind a reverse
+    // proxy that serves these themselves can leave static-dir empty.
+    let static_dir = state.config.server.static_dir.clone();
+    if !static_dir.is_empty() {
+        let base = std::path::Path::new(&static_dir);
+        for sub in ["js", "css", "img", "demo"] {
+            let path = base.join(sub);
+            if path.is_dir() {
+                r = r.nest_service(
+                    &format!("/{sub}"),
+                    tower_http::services::ServeDir::new(&path),
+                );
+            }
+        }
+    }
+
+    r.route("/", get(handlers::fetch))
         .route("/new", post(handlers::new_comment))
         .route("/config", get(handlers::config_endpoint))
         .route("/count", post(handlers::counts))
         .route("/preview", post(handlers::preview))
+        .route("/info", get(handlers::info))
         .route("/feed", get(handlers::feed))
         .route("/latest", get(handlers::latest))
         .route("/id/:id", get(handlers::view))

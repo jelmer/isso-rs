@@ -1,20 +1,23 @@
-# INSTALLATION:
-# Docs:
-#   pip install sphinx
-#   apt install sassc
-# Python unit tests:
-#   pip install pytest pytest-cov
-# Javascript frontend client:
-#   make init
+# Top-level Makefile for isso (Rust port of the Python commenting service).
+#
+# Project layout after the Rust migration:
+#   isso-rs/                — Rust crate (server + admin UI + importers)
+#   isso-rs/static/js/      — JS frontend sources (webpack-built bundles
+#                              land here and are served by isso-rs at /js/)
+#   docs/                   — Sphinx docs
+#   apidoc/                 — apiDoc configuration
+#
+# Install dependencies:
+#   JS frontend:    make init
+#   Docs:           pip install sphinx && apt install sassc
+#   Rust:           cargo (stable)
 
-ISSO_JS_SRC := $(shell find isso/js/app -type f) \
-	       $(shell ls isso/js/*.js | grep -vE "(min|dev)")
+ISSO_JS_SRC := $(shell find isso-rs/static/js/app -type f 2>/dev/null) \
+	       $(shell ls isso-rs/static/js/*.js 2>/dev/null | grep -vE "(min|dev)")
 
-ISSO_JS_DST := isso/js/embed.min.js isso/js/embed.dev.js \
-	       isso/js/count.min.js isso/js/count.dev.js \
-	       isso/js/count.dev.js.map isso/js/embed.dev.js.map
-
-ISSO_PY_SRC := $(shell find isso/ | grep -E '^isso/.+.py$$')
+ISSO_JS_DST := isso-rs/static/js/embed.min.js isso-rs/static/js/embed.dev.js \
+	       isso-rs/static/js/count.min.js isso-rs/static/js/count.dev.js \
+	       isso-rs/static/js/count.dev.js.map isso-rs/static/js/embed.dev.js.map
 
 DOCS_RST_SRC := $(shell find docs/ -type f -name '*.rst') \
 		$(wildcard docs/_theme/*) \
@@ -43,83 +46,74 @@ ISSO_RELEASE_IMAGE ?= isso:release
 ISSO_DOCKER_REGISTRY ?= ghcr.io/isso-comments
 TESTBED_IMAGE ?= isso-js-testbed:latest
 
-all: js site
+all: build js site
 
+# --------------------------------------------------------------------- Rust
+build:
+	cd isso-rs && cargo build --release
+
+test-rust:
+	cd isso-rs && cargo test
+
+lint-rust:
+	cd isso-rs && cargo clippy --all-targets -- -D warnings
+	cd isso-rs && cargo fmt --check
+
+# --------------------------------------------------------------------- JS
 init:
 	npm install --omit=optional
 
-flakes:
-	ruff check isso/ contrib/ --statistics
-
-format:
-	ruff format isso/ contrib/
-
-format-check:
-	ruff format --check isso/ contrib/
-
 # Note: It doesn't make sense to split up configs by output file with
 # webpack, just run everything at once
-isso/js/embed.min.js: $(ISSO_JS_SRC)
+isso-rs/static/js/embed.min.js: $(ISSO_JS_SRC)
 	npm run build-prod
 
-isso/js/count.min.js: isso/js/embed.min.js
+isso-rs/static/js/count.min.js: isso-rs/static/js/embed.min.js
 
-isso/js/embed.dev.js: $(ISSO_JS_SRC)
+isso-rs/static/js/embed.dev.js: $(ISSO_JS_SRC)
 	npm run build-dev
 
-isso/js/count.dev.js: isso/js/embed.dev.js
+isso-rs/static/js/count.dev.js: isso-rs/static/js/embed.dev.js
 
-# Note: No need to depend on css sources since they are no longer inlined
 js: $(ISSO_JS_DST)
 
+# --------------------------------------------------------------------- Docs
 css: $(DOCS_CSS_DST)
 
 ${DOCS_CSS_DST}: $(DOCS_CSS_SRC) $(DOCS_CSS_DEP)
 	$(SASS) $(DOCS_CSS_SRC) $@
 
-# Sphinx: "-W" flag turns warnings into errors, can be disabled for debugging
 ${DOCS_HTML_DST}: $(DOCS_RST_SRC) $(DOCS_CSS_DST)
 	sphinx-build -b dirhtml -W docs/ $@
 
 site: $(DOCS_HTML_DST)
 
-# Generate docs using apiDoc. Config inside apidoc.json
-# https://apidocjs.com/
 apidoc-init:
 	npm install apidoc
 
-apidoc: $(ISSO_PY_SRC) $(APIDOC_SRC)
-	$(APIDOC) --config apidoc/apidoc.json \
-		--input isso/views/ --input apidoc/ \
-		--output $(APIDOC_DST) --private
-	cp -rT $(APIDOC_DST) $(DOCS_HTML_DST)/docs/api/
+# apiDoc previously scraped annotations from isso/views/comments.py; with the
+# Rust port those annotations now live in the handler module docstrings.
+# TODO: port the apidoc pipeline to read from isso-rs/src/server/handlers.rs
+# instead. For now apidoc targets are a no-op.
+apidoc:
+	@echo "apidoc generation is TODO after the Rust port; skipping."
 
-coverage: $(ISSO_PY_SRC)
-	coverage run --omit='*/tests/*' --source isso -m pytest
-	coverage report --omit='*/tests/*'
-
-test: $(ISSO_PY_SRC)
-	PYTHONPATH=. pytest --doctest-modules isso/
-
+# --------------------------------------------------------------------- Docker
 docker:
 	DOCKER_BUILDKIT=1 docker build -t $(ISSO_IMAGE) .
 
-# For maintainers making releases only:
 docker-release:
 	DOCKER_BUILDKIT=1 docker build -t $(ISSO_IMAGE) .
 
 docker-run:
 	docker run -d --rm --name isso -p 127.0.0.1:8080:8080 \
 		--mount type=bind,source=$(PWD)/contrib/isso-dev.cfg,target=/config/isso.cfg,readonly \
-		$(ISSO_IMAGE) isso.run
+		$(ISSO_IMAGE)
 
-# For maintainers only, discouraged in favor of the GitHub action running on
-# every git push
 docker-push:
 	docker tag $(ISSO_IMAGE) $(ISSO_DOCKER_REGISTRY)/$(ISSO_IMAGE)
 	docker push $(ISSO_DOCKER_REGISTRY)/$(ISSO_IMAGE)
 
-# For maintainers making releases only:
 docker-release-push:
 	docker tag $(ISSO_RELEASE_IMAGE) $(ISSO_DOCKER_REGISTRY)/$(ISSO_RELEASE_IMAGE)
 	docker push $(ISSO_DOCKER_REGISTRY)/$(ISSO_RELEASE_IMAGE)
@@ -127,7 +121,6 @@ docker-release-push:
 docker-testbed:
 	DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile-js-testbed -t $(TESTBED_IMAGE) .
 
-# For maintainers only:
 docker-testbed-push:
 	docker tag $(TESTBED_IMAGE) $(ISSO_DOCKER_REGISTRY)/$(TESTBED_IMAGE)
 	docker push $(ISSO_DOCKER_REGISTRY)/$(TESTBED_IMAGE)
@@ -135,42 +128,21 @@ docker-testbed-push:
 docker-js-unit:
 	docker run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
-		--mount type=bind,source=$(PWD)/isso/js/,target=/src/isso/js/,readonly \
+		--mount type=bind,source=$(PWD)/isso-rs/static/js/,target=/src/isso/js/,readonly \
 		$(TESTBED_IMAGE) npm run test-unit
 
 docker-js-integration:
 	docker run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
-		--mount type=bind,source=$(PWD)/isso/js/,target=/src/isso/js/ \
+		--mount type=bind,source=$(PWD)/isso-rs/static/js/,target=/src/isso/js/ \
 		--env ISSO_ENDPOINT='http://isso-dev.local:8080' \
 		--network container:isso-server \
 		$(TESTBED_IMAGE) npm run test-integration
-
-docker-generate-screenshots:
-	docker run \
-		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
-		--mount type=bind,source=$(PWD)/isso/js/,target=/src/isso/js/ \
-		--network container:isso-server \
-		--env ISSO_ENDPOINT='http://isso-dev.local:8080' \
-		$(TESTBED_IMAGE) npm run test-screenshots
-
-docker-compare-screenshots: docker-generate-screenshots
-	docker run \
-		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
-		--mount type=bind,source=$(PWD)/isso/js/,target=/src/isso/js/ \
-		$(TESTBED_IMAGE) bash isso/js/tests/screenshots/compare-hashes.sh
-
-docker-update-screenshots: docker-generate-screenshots
-	docker run \
-		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
-		--mount type=bind,source=$(PWD)/isso/js/,target=/src/isso/js/ \
-		$(TESTBED_IMAGE) bash isso/js/tests/screenshots/compare-hashes.sh -u
 
 clean:
 	rm -f $(ISSO_JS_DST)
 	rm -rf $(DOCS_HTML_DST)
 	rm -rf $(APIDOC_DST)
-	rm -rf .pytest_cache/
-	rm -rf .coverage
+	cd isso-rs && cargo clean
 
-.PHONY: apidoc apidoc-init clean coverage docker docker-compare-screenshots docker-generate-screenshots docker-js-integration docker-js-unit docker-push docker-release docker-release-push docker-run docker-testbed docker-testbed-push docker-update-screenshots init test
+.PHONY: all apidoc apidoc-init build clean docker docker-js-integration docker-js-unit docker-push docker-release docker-release-push docker-run docker-testbed docker-testbed-push init js lint-rust site test-rust

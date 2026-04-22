@@ -68,11 +68,11 @@ services:
         target: /src/package.json
         read_only: true
       - type: bind
-        source: ./isso/js/
+        source: ./isso-rs/static/js/
         target: /src/isso/js/
         read_only: true
       - type: bind
-        source: ./isso/js/tests/screenshots/reference/
+        source: ./isso-rs/static/js/tests/screenshots/reference/
         target: /src/isso/js/tests/screenshots/reference/
         read_only: false  # needed for generating screenshots during e2e tests
     depends_on:
