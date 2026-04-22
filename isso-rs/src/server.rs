@@ -302,30 +302,111 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-/// Extract the remote address from request headers.
+/// Extract the anonymised remote address from request headers.
 ///
-/// Python consults `X-Forwarded-For` only when the peer IP is in
-/// `[server] trusted-proxies`. We reimplement that check here, walking
-/// the XFF list from right to left and stripping trusted-proxy hops, and
-/// falling back to the TCP peer otherwise.
+/// Mirrors the Python `_remote_addr` logic from isso/views/comments.py:
 ///
-/// The caller is expected to have stamped `X-Real-Client` (or we see the
-/// raw socket peer through axum's [`ConnectInfo`]) — but since anonymisation
-/// always happens before the address is stored, the worst-case outcome of a
-/// missed XFF is "we record the proxy's /24 instead of the client's".
+/// ```text
+/// route = access_route + [peer]           # XFF (left→right) + socket peer
+/// remote_addr = next(
+///     addr for addr in reversed(route) if addr not in trusted_proxies,
+///     default=peer,
+/// )
+/// ```
+///
+/// In practice that means: when `trusted_proxies` is empty, we always use
+/// the TCP peer. When the peer *is* listed as a trusted proxy we believe
+/// its `X-Forwarded-For` and walk right-to-left, stripping any hop that
+/// also appears in the trusted set, until we find a client address.
+///
+/// Anonymisation always runs on the winning address before it leaves here.
 pub fn extract_remote_addr(headers: &HeaderMap, peer: Option<&str>, trusted: &[String]) -> String {
-    // TODO: walk XFF strictly instead of taking just the leftmost hop.
-    let raw = match peer {
-        Some(p) if !trusted.iter().any(|t| t == p) => p.to_string(),
-        _ => headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.split(',').next())
-            .map(str::trim)
-            .unwrap_or(peer.unwrap_or("0.0.0.0"))
-            .to_string(),
-    };
-    crate::ip::anonymize(&raw)
+    let peer_str = peer.unwrap_or("0.0.0.0").to_string();
+
+    // Fast path: when there are no trusted proxies, Python doesn't consult
+    // XFF at all. Use the TCP peer.
+    if trusted.is_empty() {
+        return crate::ip::anonymize(&peer_str);
+    }
+
+    // Build the full `route = [XFF..., peer]`. Hop-by-hop ordering matches
+    // access_route: the leftmost entry is the original client.
+    let xff: Vec<String> = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.split(',')
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut route = xff;
+    route.push(peer_str.clone());
+
+    // Walk right-to-left, skipping trusted-proxy hops.
+    let resolved = route
+        .iter()
+        .rev()
+        .find(|addr| !trusted.iter().any(|t| t == *addr))
+        .cloned()
+        .unwrap_or(peer_str);
+    crate::ip::anonymize(&resolved)
+}
+
+/// Resolve the *external* URL prefix a response should use for self-
+/// referencing links (admin UI, moderation emails, CORS fallback).
+///
+/// Priority, matching Python's werkzeug ProxyFix(x_prefix=1) + host detection:
+///   1. `[server] public-endpoint` if configured  (highest)
+///   2. `<scheme>://<host><prefix>` reconstructed from X-Forwarded-Proto,
+///      X-Forwarded-Host, X-Forwarded-Prefix / X-Script-Name headers
+///   3. The request's Host header + `http` scheme  (fallback)
+///   4. The first configured `[general] host`
+///
+/// Returns the URL *without* a trailing slash.
+pub fn external_url_prefix(headers: &HeaderMap, config: &Config) -> String {
+    if !config.server.public_endpoint.is_empty() {
+        return config
+            .server
+            .public_endpoint
+            .trim_end_matches('/')
+            .to_string();
+    }
+
+    let hdr = |name: &str| -> Option<&str> { headers.get(name).and_then(|v| v.to_str().ok()) };
+
+    let scheme = hdr("x-forwarded-proto")
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("http");
+    let host = hdr("x-forwarded-host")
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| hdr("host"))
+        .unwrap_or("");
+    let prefix = hdr("x-forwarded-prefix")
+        .or_else(|| hdr("x-script-name"))
+        .map(str::trim)
+        .unwrap_or("");
+
+    if !host.is_empty() {
+        let mut out = format!("{scheme}://{host}{prefix}");
+        while out.ends_with('/') {
+            out.pop();
+        }
+        return out;
+    }
+    config
+        .general
+        .hosts
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// Shared cookie builder — mirrors Python's `create_cookie` closure:
@@ -345,6 +426,106 @@ pub fn build_cookie(name: &str, value: &str, max_age: i64, config: &Config) -> H
     let secure = if is_https { "; Secure" } else { "" };
     let raw = format!("{name}={value}; Path=/; Max-Age={max_age}; SameSite={samesite}{secure}");
     HeaderValue::from_str(&raw).expect("cookie header value is ASCII")
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    fn hdr_map(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn xff_ignored_when_no_trusted_proxies_configured() {
+        // Default posture: trust only the TCP peer. XFF is attacker-controlled.
+        let headers = hdr_map(&[("x-forwarded-for", "evil.attacker")]);
+        let got = extract_remote_addr(&headers, Some("203.0.113.7"), &[]);
+        assert_eq!(got, "203.0.113.0"); // anonymised /24
+    }
+
+    #[test]
+    fn xff_right_to_left_stripping_trusted_hops() {
+        // Route: [client, trusted-proxy-A, trusted-proxy-B], peer = trusted-proxy-B.
+        // Reversed: trusted-proxy-B → trusted-proxy-A → client. First untrusted
+        // entry (right-to-left) is the client.
+        let headers = hdr_map(&[("x-forwarded-for", "198.51.100.5, 10.0.0.1")]);
+        let trusted = vec!["10.0.0.1".into(), "10.0.0.2".into()];
+        let got = extract_remote_addr(&headers, Some("10.0.0.2"), &trusted);
+        assert_eq!(got, "198.51.100.0");
+    }
+
+    #[test]
+    fn xff_falls_back_to_peer_when_every_hop_is_trusted() {
+        // If every hop in the route is trusted, the Python default=peer wins
+        // (before anonymisation).
+        let headers = hdr_map(&[("x-forwarded-for", "10.0.0.2")]);
+        let trusted = vec!["10.0.0.1".into(), "10.0.0.2".into()];
+        let got = extract_remote_addr(&headers, Some("10.0.0.1"), &trusted);
+        assert_eq!(got, "10.0.0.0");
+    }
+
+    #[test]
+    fn xff_respected_only_when_peer_is_trusted() {
+        // If the TCP peer isn't listed as trusted, the XFF header is still
+        // consulted but only to the extent the walk reaches the peer itself
+        // (which is untrusted and terminates the walk).
+        let headers = hdr_map(&[("x-forwarded-for", "198.51.100.5")]);
+        let trusted = vec!["10.0.0.1".into()];
+        let got = extract_remote_addr(&headers, Some("203.0.113.9"), &trusted);
+        assert_eq!(got, "203.0.113.0");
+    }
+
+    #[test]
+    fn external_url_prefix_prefers_public_endpoint() {
+        let mut cfg = Config::default();
+        cfg.server.public_endpoint = "https://comments.example.com/".into();
+        // Even with XFH saying something different, public-endpoint wins.
+        let headers = hdr_map(&[("x-forwarded-host", "liar.example.net")]);
+        assert_eq!(
+            external_url_prefix(&headers, &cfg),
+            "https://comments.example.com"
+        );
+    }
+
+    #[test]
+    fn external_url_prefix_reconstructs_from_forwarded_headers() {
+        let cfg = Config::default();
+        let headers = hdr_map(&[
+            ("x-forwarded-proto", "https"),
+            ("x-forwarded-host", "comments.example.com"),
+            ("x-forwarded-prefix", "/isso"),
+        ]);
+        assert_eq!(
+            external_url_prefix(&headers, &cfg),
+            "https://comments.example.com/isso"
+        );
+    }
+
+    #[test]
+    fn external_url_prefix_falls_back_to_host_header() {
+        let cfg = Config::default();
+        let headers = hdr_map(&[("host", "localhost:8080")]);
+        assert_eq!(external_url_prefix(&headers, &cfg), "http://localhost:8080");
+    }
+
+    #[test]
+    fn external_url_prefix_final_fallback_is_configured_host() {
+        let mut cfg = Config::default();
+        cfg.general.hosts = vec!["https://fallback.example/".into()];
+        let headers = HeaderMap::new();
+        assert_eq!(
+            external_url_prefix(&headers, &cfg),
+            "https://fallback.example"
+        );
+    }
 }
 
 #[cfg(test)]

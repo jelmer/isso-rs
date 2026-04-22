@@ -777,6 +777,7 @@ pub struct ModerateEditBody {
 
 pub async fn moderate_get(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((id, action, key)): Path<(i64, String, String)>,
 ) -> Result<Response, ApiError> {
     let _signed_id = moderate_verify(&state, id, &key)?;
@@ -784,7 +785,12 @@ pub async fn moderate_get(
     let thread = crate::db::threads::get_by_id(&state.db, item.tid)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let link = format!("{}{}#isso-{}", public_endpoint(&state), thread.uri, item.id);
+    let link = format!(
+        "{}{}#isso-{}",
+        public_endpoint(&state, &headers),
+        thread.uri,
+        item.id
+    );
     // Build an HTML page that POSTs back to the same URL after user
     // confirmation, matching isso/views/comments.py::moderate's GET modal.
     let action_cap = capitalize(&action);
@@ -895,20 +901,10 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-fn public_endpoint(state: &AppState) -> String {
-    if state.config.server.public_endpoint.is_empty() {
-        state
-            .config
-            .general
-            .hosts
-            .first()
-            .cloned()
-            .unwrap_or_default()
-    } else {
-        state.config.server.public_endpoint.clone()
-    }
-    .trim_end_matches('/')
-    .to_string()
+fn public_endpoint(state: &AppState, headers: &HeaderMap) -> String {
+    // Alias for the admin-template helper: both resolve to the same
+    // external URL prefix.
+    super::external_url_prefix(headers, &state.config)
 }
 
 /// `GET /latest?limit=N` — cross-thread list of the N newest accepted
@@ -1078,8 +1074,8 @@ use minijinja::context;
 ///
 /// If `[admin] enabled = false` the endpoint instead renders the `disabled`
 /// template so the operator sees a useful message rather than a 404.
-pub async fn login_get(State(state): State<AppState>) -> Response {
-    render_login_or_disabled(&state)
+pub async fn login_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    render_login_or_disabled(&state, &headers)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1093,11 +1089,11 @@ pub async fn login_post(
     Form(form): Form<LoginForm>,
 ) -> Response {
     if !state.config.admin.enabled {
-        return render_login_or_disabled(&state);
+        return render_login_or_disabled(&state, &headers);
     }
     let supplied = form.password.unwrap_or_default();
     if supplied.is_empty() || supplied != state.config.admin.password {
-        return render_login_or_disabled(&state);
+        return render_login_or_disabled(&state, &headers);
     }
     // Sign an admin-session payload; the admin endpoint accepts tokens
     // valid for 24 hours (Python's max_age=60*60*24).
@@ -1140,7 +1136,7 @@ fn redirect_to_admin(headers: &HeaderMap) -> String {
     }
 }
 
-fn render_login_or_disabled(state: &AppState) -> Response {
+fn render_login_or_disabled(state: &AppState, headers: &HeaderMap) -> Response {
     let template = if state.config.admin.enabled {
         "login.html"
     } else {
@@ -1149,29 +1145,15 @@ fn render_login_or_disabled(state: &AppState) -> Response {
     render_admin_template(
         state,
         template,
-        context! { isso_host_script => isso_host_script(state) },
+        context! { isso_host_script => isso_host_script(state, headers) },
     )
 }
 
-fn isso_host_script(state: &AppState) -> String {
-    if state.config.server.public_endpoint.is_empty() {
-        state
-            .config
-            .general
-            .hosts
-            .first()
-            .cloned()
-            .unwrap_or_default()
-            .trim_end_matches('/')
-            .to_string()
-    } else {
-        state
-            .config
-            .server
-            .public_endpoint
-            .trim_end_matches('/')
-            .to_string()
-    }
+fn isso_host_script(state: &AppState, headers: &HeaderMap) -> String {
+    // Use the proxy-aware URL resolver so deployments behind a reverse
+    // proxy at a sub-path (X-Forwarded-Prefix / X-Script-Name) link to the
+    // correct external URL rather than the internal one.
+    super::external_url_prefix(headers, &state.config)
 }
 
 fn render_admin_template(
@@ -1222,7 +1204,7 @@ pub async fn admin(
     headers: HeaderMap,
     Query(q): Query<AdminQuery>,
 ) -> Response {
-    let isso_host = isso_host_script(&state);
+    let isso_host = isso_host_script(&state, &headers);
     if !state.config.admin.enabled {
         return render_admin_template(
             &state,

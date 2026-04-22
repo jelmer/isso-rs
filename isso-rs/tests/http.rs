@@ -324,7 +324,19 @@ async fn post_then_get_roundtrip() {
 
 #[tokio::test]
 async fn vote_updates_like_count_and_rejects_duplicate() {
-    let app = router(test_state().await);
+    // Mark the default "peer" the test framework reports (an empty
+    // ConnectInfo collapses to 0.0.0.0 inside extract_remote_addr) as a
+    // trusted proxy so X-Forwarded-For headers sent by the test are
+    // honoured. Without this the fixed peer becomes the effective IP for
+    // every request and the two votes collapse to the same voter.
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.server.trusted_proxies = vec!["0.0.0.0".into()];
+        c
+    });
+    let app = router(state);
+
     let created = app
         .clone()
         .oneshot(
@@ -332,6 +344,12 @@ async fn vote_updates_like_count_and_rejects_duplicate() {
                 .method("POST")
                 .uri("/new?uri=/voted")
                 .header(header::CONTENT_TYPE, "application/json")
+                // The author needs an XFF too, otherwise the comment itself
+                // is stored with remote_addr=0.0.0.0 and self-votes from any
+                // other XFF-provided IP would collide via the bloomfilter.
+                // We also pick IPs from distinct /24s so the /24-anonymisation
+                // step doesn't make the commenter and the voter indistinguishable.
+                .header("x-forwarded-for", "192.0.2.1")
                 .body(Body::from(
                     serde_json::to_vec(&json!({"text": "vote me", "title": "V"})).unwrap(),
                 ))
