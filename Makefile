@@ -43,9 +43,12 @@ APIDOC = npx --no-install apidoc
 
 SASS = sassc
 
-ISSO_IMAGE ?= isso:latest
-ISSO_RELEASE_IMAGE ?= isso:release
-ISSO_DOCKER_REGISTRY ?= ghcr.io/isso-comments
+ISSO_IMAGE ?= isso-rs:latest
+ISSO_RELEASE_IMAGE ?= isso-rs:release
+ISSO_DOCKER_REGISTRY ?= ghcr.io/jelmer
+# The js-testbed image is shared with upstream — we consume (but don't
+# republish) their image for e2e tests.
+TESTBED_REGISTRY ?= ghcr.io/isso-comments
 TESTBED_IMAGE ?= isso-js-testbed:latest
 
 all: build js site
@@ -127,8 +130,8 @@ docker-testbed:
 	DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile-js-testbed -t $(TESTBED_IMAGE) .
 
 docker-testbed-push:
-	docker tag $(TESTBED_IMAGE) $(ISSO_DOCKER_REGISTRY)/$(TESTBED_IMAGE)
-	docker push $(ISSO_DOCKER_REGISTRY)/$(TESTBED_IMAGE)
+	docker tag $(TESTBED_IMAGE) $(TESTBED_REGISTRY)/$(TESTBED_IMAGE)
+	docker push $(TESTBED_REGISTRY)/$(TESTBED_IMAGE)
 
 docker-js-unit:
 	docker run \

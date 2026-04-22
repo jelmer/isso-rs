@@ -72,12 +72,28 @@ Supports Disqus XML, WordPress WXR, and the Isso-native generic JSON.
 
 ### Docker
 
-The `Dockerfile` builds a two-stage image (Node for the JS bundles, Rust
-for the binary) and runs `isso` directly as the entrypoint:
+Pre-built images are published to [GitHub Container Registry][ghcr] on
+every push to `master` and on every tag. Tags:
+
+- `ghcr.io/jelmer/isso-rs:latest` — rebuilt on every push to `master`
+- `ghcr.io/jelmer/isso-rs:release` — latest semver-tagged release
+- `ghcr.io/jelmer/isso-rs:{major}`, `:{major}.{minor}`, `:{version}` —
+  pinned tags for stable deployments
+
+[ghcr]: https://github.com/jelmer/isso-rs/pkgs/container/isso-rs
 
 ```console
-$ docker build -t isso .
-$ docker run -p 8080:8080 -v $PWD/config:/config -v $PWD/db:/db isso
+$ docker run -p 8080:8080 \
+    -v $PWD/config:/config -v $PWD/db:/db \
+    ghcr.io/jelmer/isso-rs:release
+```
+
+To build locally from the repo's three-stage `Dockerfile` (Node → Rust →
+Alpine runtime):
+
+```console
+$ make docker     # tags isso-rs:latest locally
+$ docker run -p 8080:8080 -v $PWD/config:/config -v $PWD/db:/db isso-rs
 ```
 
 ## Differences from the upstream Python server
