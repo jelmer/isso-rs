@@ -20,6 +20,7 @@ use sqlx::SqlitePool;
 use crate::config::Config;
 use crate::hash::Hasher;
 use crate::markdown::Renderer;
+use crate::notify::Notifier;
 use crate::signer::Signer;
 
 #[derive(Clone)]
@@ -29,6 +30,7 @@ pub struct AppState {
     pub hasher: Arc<Hasher>,
     pub signer: Arc<Signer>,
     pub renderer: Arc<Renderer>,
+    pub notifier: Arc<Notifier>,
 }
 
 impl AppState {
@@ -46,20 +48,52 @@ impl AppState {
             &config.markup.allowed_elements,
             &config.markup.allowed_attributes,
         );
+        let config = Arc::new(config);
+        let signer = Arc::new(Signer::new(session_key.as_bytes()));
+        let notifier = Arc::new(Notifier::new(Arc::clone(&config), Arc::clone(&signer)));
         Ok(Self {
-            signer: Arc::new(Signer::new(session_key.as_bytes())),
+            signer,
             hasher: Arc::new(hasher),
             renderer: Arc::new(renderer),
+            notifier,
             db,
-            config: Arc::new(config),
+            config,
         })
     }
 }
 
 /// Build the axum router on top of the given state.
+///
+/// Also spawns the background purge task if `[moderation] enabled` — mirrors
+/// isso/core.py's ThreadedMixin, which purges stale pending comments once per
+/// `purge-after` interval. The task runs for the lifetime of the process.
 pub async fn build_app(config: Config) -> anyhow::Result<Router> {
     let state = AppState::from_config(config).await?;
+    maybe_spawn_purge(&state);
     Ok(router(state))
+}
+
+fn maybe_spawn_purge(state: &AppState) {
+    if !state.config.moderation.enabled {
+        return;
+    }
+    let pool = state.db.clone();
+    let interval = state.config.moderation.purge_after;
+    let delta_secs = interval.as_secs() as f64;
+    tokio::spawn(async move {
+        // Run one purge immediately, then every `purge-after` — matches the
+        // Python uWSGIMixin which also does an initial purge.
+        loop {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            if let Err(e) = crate::db::comments::purge(&pool, now, delta_secs).await {
+                tracing::warn!("periodic purge failed: {e}");
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
 }
 
 /// Router assembly extracted so tests can build a router against an
@@ -71,11 +105,22 @@ pub fn router(state: AppState) -> Router {
         .route("/config", get(handlers::config_endpoint))
         .route("/count", post(handlers::counts))
         .route("/preview", post(handlers::preview))
+        .route("/feed", get(handlers::feed))
+        .route("/latest", get(handlers::latest))
         .route("/id/:id", get(handlers::view))
         .route("/id/:id", put(handlers::edit))
         .route("/id/:id", delete(handlers::delete_comment))
         .route("/id/:id/like", post(handlers::like))
         .route("/id/:id/dislike", post(handlers::dislike))
+        .route(
+            "/id/:id/unsubscribe/:email/:key",
+            get(handlers::unsubscribe),
+        )
+        .route("/id/:id/:action/:key", get(handlers::moderate_get))
+        .route("/id/:id/:action/:key", post(handlers::moderate_post))
+        .route("/login/", get(handlers::login_get))
+        .route("/login/", post(handlers::login_post))
+        .route("/admin/", get(handlers::admin))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             cors_middleware,
@@ -178,10 +223,15 @@ fn join_origin(parts: &(String, Option<u16>, bool)) -> String {
 
 /// Mirror Python's `xhr` decorator: reject mutating requests whose
 /// Content-Type is form-encoded, multipart, or plain text. GET/HEAD skip
-/// the check entirely (they can't trigger simple-form CSRF).
+/// the check entirely (they can't trigger simple-form CSRF). `/login/`
+/// is also exempt — it's a regular `<form>` POST by design (the Python
+/// version doesn't wrap login in `@xhr` either).
 async fn csrf_guard(req: Request<Body>, next: Next) -> Response {
     let method = req.method();
     if matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    if req.uri().path() == "/login/" {
         return next.run(req).await;
     }
     if let Some(ct) = req.headers().get(header::CONTENT_TYPE) {
@@ -211,7 +261,11 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
             ApiError::Internal(e) => {
                 tracing::error!("internal error: {e:?}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+                // Include the debug string in the body — the 5xx path is
+                // only taken on genuine bugs / config issues, so the
+                // information is actionable for operators.
+                let msg = format!("internal error: {e:?}");
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
             }
         }
     }

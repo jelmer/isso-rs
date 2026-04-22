@@ -5,5 +5,7 @@ pub mod guard;
 pub mod hash;
 pub mod ip;
 pub mod markdown;
+pub mod notify;
 pub mod server;
 pub mod signer;
+pub mod templates;

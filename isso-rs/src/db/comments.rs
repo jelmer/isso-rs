@@ -440,6 +440,131 @@ pub async fn is_previously_approved_author(
     Ok(found == 1)
 }
 
+/// Comment count grouped by mode, returned as `(mode, count)` pairs.
+/// Used by the admin UI to label tabs with item counts.
+pub async fn count_by_mode(pool: &SqlitePool) -> sqlx::Result<Vec<(i64, i64)>> {
+    let rows: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT mode, COUNT(id) FROM comments GROUP BY mode")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows)
+}
+
+/// Parameters for the admin-UI list query (Python's `Comments.fetchall`).
+/// Unlike `FetchParams` this joins threads and returns the URI + title
+/// alongside each comment, supports per-thread grouping (`order_by = "tid"`),
+/// and paginates by page number rather than offset.
+#[derive(Debug, Clone)]
+pub struct AdminFetchParams<'a> {
+    /// Bitmask filter: 1, 2, 4, or 5 in the public handler; 1/2/4 used by admin tabs.
+    pub mode: i64,
+    pub order_by: AdminOrderBy,
+    pub asc: bool,
+    pub limit: i64,
+    pub page: i64,
+    /// Optional: narrow to a single comment id (admin search by URL).
+    pub comment_id: Option<i64>,
+    /// Optional: narrow to a thread URI (admin search by thread URL).
+    pub thread_uri: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AdminOrderBy {
+    Id,
+    Created,
+    Modified,
+    Likes,
+    Dislikes,
+    Tid,
+}
+
+impl AdminOrderBy {
+    fn as_sql(self) -> &'static str {
+        match self {
+            AdminOrderBy::Id => "comments.id",
+            AdminOrderBy::Created => "comments.created",
+            AdminOrderBy::Modified => "comments.modified",
+            AdminOrderBy::Likes => "comments.likes",
+            AdminOrderBy::Dislikes => "comments.dislikes",
+            AdminOrderBy::Tid => "comments.tid",
+        }
+    }
+}
+
+/// Row returned by the admin listing — a Comment plus the joined thread fields.
+#[derive(Debug, Clone)]
+pub struct AdminCommentRow {
+    pub comment: Comment,
+    pub uri: String,
+    pub title: Option<String>,
+}
+
+/// Admin-UI list endpoint. Mirrors `Comments.fetchall` in isso/db/comments.py.
+pub async fn fetch_admin(
+    pool: &SqlitePool,
+    params: &AdminFetchParams<'_>,
+) -> sqlx::Result<Vec<AdminCommentRow>> {
+    let mut sql = String::from(
+        "SELECT comments.*, threads.uri AS thread_uri, threads.title AS thread_title \
+         FROM comments INNER JOIN threads ON comments.tid = threads.id WHERE ",
+    );
+    if params.comment_id.is_some() {
+        sql.push_str("comments.id = ?");
+    } else if params.thread_uri.is_some() {
+        sql.push_str("threads.uri = ?");
+    } else {
+        sql.push_str("comments.mode = ?");
+    }
+    // Match Python's ORDER BY: group replies under their parent's `created`,
+    // then the requested column, then `created` as a tie-breaker.
+    sql.push_str(" ORDER BY CASE WHEN comments.parent IS NOT NULL THEN comments.created END, ");
+    sql.push_str(params.order_by.as_sql());
+    if !params.asc {
+        sql.push_str(" DESC");
+    }
+    sql.push_str(", comments.created");
+    sql.push_str(" LIMIT ?,?");
+
+    let mut q = sqlx::query(&sql);
+    if let Some(cid) = params.comment_id {
+        q = q.bind(cid);
+    } else if let Some(uri) = params.thread_uri {
+        q = q.bind(uri);
+    } else {
+        q = q.bind(params.mode);
+    }
+    q = q.bind(params.page * params.limit).bind(params.limit);
+
+    let rows = q.fetch_all(pool).await?;
+    rows.iter()
+        .map(|r| {
+            Ok(AdminCommentRow {
+                comment: row_to_comment(r)?,
+                uri: r.try_get::<String, _>("thread_uri")?,
+                title: r.try_get::<Option<String>, _>("thread_title")?,
+            })
+        })
+        .collect()
+}
+
+/// Fetch the N most recently created accepted comments across all threads,
+/// enriched with their thread's URI. Backs the `/latest` endpoint, which is
+/// the only cross-thread public listing.
+pub async fn fetch_latest(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<(Comment, String)>> {
+    let rows = sqlx::query(
+        "SELECT comments.*, threads.uri AS thread_uri FROM comments \
+         INNER JOIN threads ON threads.id = comments.tid \
+         WHERE comments.mode = 1 \
+         ORDER BY comments.created DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|r| Ok((row_to_comment(r)?, r.try_get::<String, _>("thread_uri")?)))
+        .collect()
+}
+
 /// Delete stale pending comments older than `delta` seconds.
 pub async fn purge(pool: &SqlitePool, now_unix: f64, delta_secs: f64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM comments WHERE mode = 2 AND ? - created > ?")

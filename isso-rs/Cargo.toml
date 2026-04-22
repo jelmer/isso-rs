@@ -18,7 +18,16 @@ clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 hex = "0.4"
 hmac = "0.12"
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls",
+    "rustls-native-certs",
+    "ring",
+] }
 md-5 = "0.10"
+minijinja = { version = "2", features = ["loader"] }
 pbkdf2 = "0.12"
 pulldown-cmark = "0.12"
 rand = "0.8"
@@ -41,6 +50,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+urlencoding = "2"
 
 [dev-dependencies]
 http-body-util = "0.1"

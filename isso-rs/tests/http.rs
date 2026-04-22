@@ -17,6 +17,7 @@ use tower::ServiceExt;
 use isso_rs::config::Config;
 use isso_rs::hash::Hasher;
 use isso_rs::markdown::Renderer;
+use isso_rs::notify::Notifier;
 use isso_rs::server::{router, AppState};
 use isso_rs::signer::Signer;
 
@@ -58,12 +59,16 @@ async fn test_state() -> AppState {
 
     let mut config = Config::default();
     config.general.dbpath = ":memory:".into();
+    let config = Arc::new(config);
+    let signer = Arc::new(Signer::new(b"test-session-key"));
+    let notifier = Arc::new(Notifier::new(Arc::clone(&config), Arc::clone(&signer)));
     AppState {
-        config: Arc::new(config),
+        config,
         db: pool,
         hasher: Arc::new(Hasher::from_config("pbkdf2", "Eech7co8Ohloopo9Ol6baimi").unwrap()),
-        signer: Arc::new(Signer::new(b"test-session-key")),
+        signer,
         renderer: Arc::new(Renderer::new()),
+        notifier,
     }
 }
 
@@ -390,6 +395,384 @@ async fn preview_renders_markdown() {
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp).await;
     assert_eq!(j, json!({"text": "<p>hi <strong>world</strong></p>"}));
+}
+
+#[tokio::test]
+async fn moderate_activate_flips_mode_to_accepted() {
+    // Emulate the moderation email click flow: insert a pending comment
+    // then hit /id/:id/activate/:key with a key signed for that id.
+    let state = test_state().await;
+    let key = state.signer.sign(&1_i64).unwrap();
+    let signer_key = key.clone();
+    let app = router(state.clone());
+
+    // Moderation is only enabled when [moderation] enabled=true — without it
+    // POST /new returns mode=1. For the test, insert a pending comment directly.
+    sqlx::query("INSERT INTO threads (id, uri, title) VALUES (1, '/m', 'M')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, \
+         author, email, website, voters, notification) \
+         VALUES (1, NULL, 1000.0, 2, '127.0.0.0', 'pending', NULL, NULL, NULL, zeroblob(256), 0)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/id/1/activate/{signer_key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert_eq!(body, "Comment has been activated");
+
+    // Mode must have moved 2 -> 1.
+    let mode: i64 = sqlx::query_scalar("SELECT mode FROM comments WHERE id = 1")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(mode, 1);
+}
+
+#[tokio::test]
+async fn moderate_rejects_wrong_key() {
+    let state = test_state().await;
+    let app = router(state.clone());
+    sqlx::query("INSERT INTO threads (id, uri, title) VALUES (1, '/m', 'M')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, voters, notification) \
+         VALUES (1, NULL, 1.0, 2, '127.0.0.0', 'x', zeroblob(256), 0)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    // Key is signed for id=999, not the comment we're trying to activate.
+    let bad_key = state.signer.sign(&999_i64).unwrap();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/id/1/activate/{bad_key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn unsubscribe_turns_off_notifications() {
+    let state = test_state().await;
+    sqlx::query("INSERT INTO threads (id, uri, title) VALUES (1, '/t', 'T')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, email, voters, notification) \
+         VALUES (1, NULL, 1.0, 1, '127.0.0.0', 'hi', 'jane@example.com', zeroblob(256), 1)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let email = "jane@example.com";
+    let key = state.signer.sign(&("unsubscribe", email)).unwrap();
+    let app = router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/id/1/unsubscribe/{email}/{key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // notification flag now 0.
+    let n: i64 = sqlx::query_scalar("SELECT notification FROM comments WHERE id = 1")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn latest_requires_feature_flag_and_limit() {
+    // Without latest-enabled = true we 404.
+    let app = router(test_state().await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/latest?limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // With the flag on but missing/invalid limit → 400.
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.general.latest_enabled = true;
+        c
+    });
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/latest")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn feed_disabled_unless_rss_base_set() {
+    let app = router(test_state().await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/feed?uri=/any")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn feed_returns_atom_xml_when_enabled() {
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.rss.base = "https://comments.example.com".into();
+        c
+    });
+    let state_db = state.db.clone();
+    let app = router(state.clone());
+    sqlx::query("INSERT INTO threads (id, uri, title) VALUES (1, '/p', 'P')")
+        .execute(&state_db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, author, voters, notification) \
+         VALUES (1, NULL, 1000.0, 1, '127.0.0.0', 'hello', 'jane', zeroblob(256), 0)",
+    )
+    .execute(&state_db)
+    .await
+    .unwrap();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/feed?uri=/p")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/atom+xml; charset=utf-8"
+    );
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<feed"), "got: {body}");
+    assert!(body.contains("<title>Comments for comments.example.com/p</title>"));
+    assert!(body.contains("jane"));
+}
+
+#[tokio::test]
+async fn admin_disabled_renders_disabled_html() {
+    let app = router(test_state().await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(
+        body.contains("Administration is disabled on this instance"),
+        "got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn admin_login_required_without_cookie() {
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.admin.enabled = true;
+        c.admin.password = "hunter2".into();
+        c
+    });
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(
+        body.contains("<form method=\"POST\"") && body.contains("/login/"),
+        "expected login.html, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn admin_login_wrong_password_reshows_form() {
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.admin.enabled = true;
+        c.admin.password = "hunter2".into();
+        c
+    });
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login/")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("password=wrong"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<form method=\"POST\""), "got: {body}");
+}
+
+#[tokio::test]
+async fn admin_login_right_password_sets_session_cookie_and_redirects() {
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.admin.enabled = true;
+        c.admin.password = "hunter2".into();
+        c
+    });
+    let signer = state.signer.clone();
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login/")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("password=hunter2"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/admin/");
+    // Set-Cookie was stamped and verifies.
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("admin-session cookie present");
+    let value = set_cookie
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .split_once('=')
+        .unwrap()
+        .1
+        .to_string();
+    let payload: serde_json::Value = signer.unsign(&value, Some(86400), 0).unwrap();
+    assert_eq!(payload, serde_json::json!({"logged": true}));
+}
+
+#[tokio::test]
+async fn admin_lists_comments_with_valid_session() {
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.admin.enabled = true;
+        c.admin.password = "hunter2".into();
+        c
+    });
+    // Seed some comments so the admin listing has something to show.
+    sqlx::query("INSERT INTO threads (id, uri, title) VALUES (1, '/adminp', 'AdminPost')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, author, voters, notification) \
+         VALUES (1, NULL, 1000.0, 2, '127.0.0.0', 'pending one', 'alice', zeroblob(256), 0)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    // Forge the session cookie by signing {logged:true}.
+    let session = state
+        .signer
+        .sign(&serde_json::json!({"logged": true}))
+        .unwrap();
+    let app = router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/?mode=2")
+                .header(header::COOKIE, format!("admin-session={session}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("pending one"), "missing comment text: {body}");
+    assert!(body.contains("alice"), "missing author: {body}");
+    assert!(
+        body.contains("class=\"label label-pending active\""),
+        "pending tab not active: {body}"
+    );
 }
 
 #[tokio::test]

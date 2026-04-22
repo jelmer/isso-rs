@@ -332,6 +332,10 @@ pub async fn new_comment(
     };
     let inserted = cmt::add(&state.db, &q.uri, now, &new_c).await?;
 
+    // Fire notification hooks (stdout log, SMTP admin email). The notifier
+    // does its own work on a tokio task so this doesn't block the response.
+    state.notifier.comment_created(&thread, &inserted);
+
     let token = state
         .signer
         .sign(&json!([inserted.id, text_sha1_hex(&inserted.text)]))
@@ -710,4 +714,676 @@ pub async fn preview(
         .text
         .ok_or_else(|| ApiError::BadRequest("no text given".into()))?;
     Ok(Json(json!({"text": state.renderer.render(&text)})))
+}
+
+/// `GET /id/:id/unsubscribe/:email/:key` — turn off reply notifications for
+/// a specific commenter on this thread. Key is `Signer::sign(("unsubscribe", email))`
+/// with effectively unlimited max_age (Python uses 2**32 seconds).
+pub async fn unsubscribe(
+    State(state): State<AppState>,
+    Path((id, email, key)): Path<(i64, String, String)>,
+) -> Result<Response, ApiError> {
+    let email = urlencoding::decode(&email)
+        .map(|s| s.into_owned())
+        .unwrap_or(email);
+    let payload: (String, String) = state
+        .signer
+        .unsign(&key, None, now_unix() as u64)
+        .map_err(|e| ApiError::Forbidden(format!("invalid key: {e}")))?;
+    if payload.0 != "unsubscribe" || payload.1 != email {
+        return Err(ApiError::Forbidden("key / email mismatch".into()));
+    }
+    if cmt::get(&state.db, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    cmt::unsubscribe(&state.db, &email, id).await?;
+
+    let html = "<!DOCTYPE html><html><head><title>Successfully unsubscribed</title></head>\
+        <body><p>You have been unsubscribed from replies in the given conversation.</p></body></html>";
+    let mut resp = (StatusCode::OK, html).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    Ok(resp)
+}
+
+/// `GET/POST /id/:id/:action/:key` — moderation.
+///
+/// The `key` is `Signer::sign(comment_id)` with a long max_age; it's the
+/// same signature admin emails include in their Delete/Activate links.
+///
+/// GET returns an HTML confirmation page that POSTs the same URL from JS.
+/// POST performs the action (activate / edit / delete) and returns plain text
+/// or JSON depending on the action.
+#[derive(Debug, Deserialize)]
+pub struct ModerateEditBody {
+    text: Option<String>,
+    author: Option<String>,
+    website: Option<String>,
+}
+
+pub async fn moderate_get(
+    State(state): State<AppState>,
+    Path((id, action, key)): Path<(i64, String, String)>,
+) -> Result<Response, ApiError> {
+    let _signed_id = moderate_verify(&state, id, &key)?;
+    let item = cmt::get(&state.db, id).await?.ok_or(ApiError::NotFound)?;
+    let thread = crate::db::threads::get_by_id(&state.db, item.tid)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let link = format!("{}{}#isso-{}", public_endpoint(&state), thread.uri, item.id);
+    // Build an HTML page that POSTs back to the same URL after user
+    // confirmation, matching isso/views/comments.py::moderate's GET modal.
+    let action_cap = capitalize(&action);
+    let link_json = serde_json::to_string(&link).unwrap_or_else(|_| "\"\"".to_string());
+    let html = format!(
+        "<!DOCTYPE html>\
+         <html>\
+         <head><title>{action_cap}</title></head>\
+         <body>\
+         <script>\
+           if (confirm('{action_cap}: Are you sure?')) {{\
+             var xhr = new XMLHttpRequest();\
+             xhr.open('POST', window.location.href);\
+             xhr.send(null);\
+             xhr.onload = function() {{ window.location.href = {link_json}; }};\
+           }}\
+         </script>\
+         </body>\
+         </html>"
+    );
+    let mut resp = (StatusCode::OK, html).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    Ok(resp)
+}
+
+pub async fn moderate_post(
+    State(state): State<AppState>,
+    Path((id, action, key)): Path<(i64, String, String)>,
+    body: Option<Json<ModerateEditBody>>,
+) -> Result<Response, ApiError> {
+    let signed_id = moderate_verify(&state, id, &key)?;
+    let item = cmt::get(&state.db, signed_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let thread = crate::db::threads::get_by_id(&state.db, item.tid)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    match action.as_str() {
+        "activate" => {
+            if item.mode == 1 {
+                return Ok((StatusCode::OK, "Already activated").into_response());
+            }
+            cmt::activate(&state.db, signed_id).await?;
+            // Refresh after the update and fire the activate notification.
+            if let Some(activated) = cmt::get(&state.db, signed_id).await? {
+                state.notifier.comment_activated(&thread, &activated);
+            }
+            Ok((StatusCode::OK, "Comment has been activated").into_response())
+        }
+        "delete" => {
+            cmt::delete(&state.db, signed_id).await?;
+            Ok((StatusCode::OK, "Comment has been deleted").into_response())
+        }
+        "edit" => {
+            let body = body.ok_or_else(|| {
+                ApiError::BadRequest("edit requires a JSON body with text/author/website".into())
+            })?;
+            verify_comment(
+                body.0.text.as_deref(),
+                body.0.author.as_deref(),
+                body.0.website.as_deref(),
+                None,
+            )
+            .map_err(ApiError::BadRequest)?;
+            let text = body.0.text.clone().expect("verified above");
+            let author = body.0.author.clone().map(|a| html_escape(&a, false));
+            let website = body.0.website.clone().map(|w| html_escape(&w, true));
+            let patch = CommentUpdate {
+                text: Some(&text),
+                author: Some(author.as_deref()),
+                website: Some(website.as_deref()),
+                modified: Some(now_unix()),
+                ..Default::default()
+            };
+            let updated = cmt::update(&state.db, signed_id, &patch)
+                .await?
+                .ok_or(ApiError::NotFound)?;
+            let json_body = serde_json::to_value(render_comment(updated, &state, true))
+                .map_err(|e| ApiError::Internal(e.into()))?;
+            Ok((StatusCode::OK, Json(json_body)).into_response())
+        }
+        other => Err(ApiError::BadRequest(format!("unknown action: {other}"))),
+    }
+}
+
+fn moderate_verify(state: &AppState, id: i64, key: &str) -> Result<i64, ApiError> {
+    let signed: i64 = state
+        .signer
+        .unsign(key, None, now_unix() as u64)
+        .map_err(|e| ApiError::Forbidden(format!("invalid key: {e}")))?;
+    if signed != id {
+        return Err(ApiError::Forbidden("key / id mismatch".into()));
+    }
+    Ok(signed)
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+fn public_endpoint(state: &AppState) -> String {
+    if state.config.server.public_endpoint.is_empty() {
+        state
+            .config
+            .general
+            .hosts
+            .first()
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        state.config.server.public_endpoint.clone()
+    }
+    .trim_end_matches('/')
+    .to_string()
+}
+
+/// `GET /latest?limit=N` — cross-thread list of the N newest accepted
+/// comments. Disabled unless `[general] latest-enabled = true`.
+#[derive(Debug, Deserialize)]
+pub struct LatestQuery {
+    limit: Option<String>,
+}
+
+pub async fn latest(
+    State(state): State<AppState>,
+    Query(q): Query<LatestQuery>,
+) -> Result<Response, ApiError> {
+    if !state.config.general.latest_enabled {
+        return Err(ApiError::NotFound);
+    }
+    let limit: i64 = q
+        .limit
+        .ok_or_else(|| {
+            ApiError::BadRequest("Query parameter 'limit' is mandatory (integer, >0)".into())
+        })?
+        .parse()
+        .map_err(|_| {
+            ApiError::BadRequest("Query parameter 'limit' is mandatory (integer, >0)".into())
+        })?;
+    if limit <= 0 {
+        return Err(ApiError::BadRequest(
+            "Query parameter 'limit' is mandatory (integer, >0)".into(),
+        ));
+    }
+    let rows = cmt::fetch_latest(&state.db, limit).await?;
+    let out: Vec<Value> = rows
+        .into_iter()
+        .map(|(c, uri)| {
+            let mut rendered = serde_json::to_value(render_comment(c, &state, true))
+                .expect("render_comment produces JSON-safe output");
+            if let Some(obj) = rendered.as_object_mut() {
+                obj.insert("uri".to_string(), Value::String(uri));
+            }
+            rendered
+        })
+        .collect();
+    Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+/// `GET /feed?uri=...` — Atom feed for a thread's accepted comments.
+/// Disabled unless `[rss] base` is set.
+pub async fn feed(
+    State(state): State<AppState>,
+    Query(q): Query<FetchQuery>,
+) -> Result<Response, ApiError> {
+    let base = state.config.rss.base.trim_end_matches('/');
+    if base.is_empty() {
+        return Err(ApiError::NotFound);
+    }
+    let hostname = url::Url::parse(base)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .unwrap_or_default();
+
+    let limit: i64 = state.config.rss.limit as i64;
+    let params = cmt::FetchParams {
+        uri: &q.uri,
+        mode: 1, // Atom feed shows only accepted comments.
+        after: 0.0,
+        parent: None,
+        order_by: cmt::OrderBy::Id,
+        asc: false,
+        limit: Some(limit),
+        offset: 0,
+    };
+    let comments = cmt::fetch(&state.db, &params).await?;
+
+    let mut xml = String::new();
+    xml.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    xml.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\" xmlns:thr=\"http://purl.org/syndication/thread/1.0\">\n");
+    xml.push_str(&format!(
+        "  <id>tag:{hostname},2018:/isso/thread{uri}</id>\n",
+        uri = xml_escape(&q.uri)
+    ));
+    xml.push_str(&format!(
+        "  <title>Comments for {hostname}{uri}</title>\n",
+        uri = xml_escape(&q.uri)
+    ));
+    let newest_ts = comments
+        .first()
+        .map(|c| c.modified.unwrap_or(c.created))
+        .unwrap_or(0.0);
+    xml.push_str(&format!(
+        "  <updated>{}</updated>\n",
+        iso8601_utc(newest_ts)
+    ));
+    for c in &comments {
+        xml.push_str("  <entry>\n");
+        xml.push_str(&format!(
+            "    <id>tag:{hostname},2018:/isso/{tid}/{cid}</id>\n",
+            tid = c.tid,
+            cid = c.id
+        ));
+        xml.push_str(&format!("    <title>Comment #{}</title>\n", c.id));
+        xml.push_str(&format!(
+            "    <updated>{}</updated>\n",
+            iso8601_utc(c.modified.unwrap_or(c.created))
+        ));
+        if let Some(author) = c.author.as_deref() {
+            xml.push_str("    <author><name>");
+            xml.push_str(&xml_escape(author));
+            xml.push_str("</name></author>\n");
+        }
+        xml.push_str(&format!(
+            "    <link href=\"{base}{uri}#isso-{cid}\"/>\n",
+            base = xml_escape(base),
+            uri = xml_escape(&q.uri),
+            cid = c.id
+        ));
+        xml.push_str("    <content type=\"html\">");
+        xml.push_str(&xml_escape(&state.renderer.render(&c.text)));
+        xml.push_str("</content>\n");
+        if let Some(parent_id) = c.parent {
+            xml.push_str(&format!(
+                "    <thr:in-reply-to ref=\"tag:{hostname},2018:/isso/{tid}/{pid}\" \
+                 href=\"{base}{uri}#isso-{pid}\"/>\n",
+                tid = c.tid,
+                pid = parent_id,
+                base = xml_escape(base),
+                uri = xml_escape(&q.uri),
+            ));
+        }
+        xml.push_str("  </entry>\n");
+    }
+    xml.push_str("</feed>\n");
+
+    let mut resp = (StatusCode::OK, xml).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/atom+xml; charset=utf-8"),
+    );
+    Ok(resp)
+}
+
+/// Minimal XML text escape. We only emit ASCII-safe fields (URIs, authors,
+/// rendered HTML that's already sanitised), so this is enough.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Admin UI & login.
+// ---------------------------------------------------------------------------
+
+use axum::extract::Form;
+use minijinja::context;
+
+/// Serve the login form (GET /login/ renders, POST validates password and
+/// sets the admin-session cookie that /admin/ requires).
+///
+/// If `[admin] enabled = false` the endpoint instead renders the `disabled`
+/// template so the operator sees a useful message rather than a 404.
+pub async fn login_get(State(state): State<AppState>) -> Response {
+    render_login_or_disabled(&state)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginForm {
+    password: Option<String>,
+}
+
+pub async fn login_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<LoginForm>,
+) -> Response {
+    if !state.config.admin.enabled {
+        return render_login_or_disabled(&state);
+    }
+    let supplied = form.password.unwrap_or_default();
+    if supplied.is_empty() || supplied != state.config.admin.password {
+        return render_login_or_disabled(&state);
+    }
+    // Sign an admin-session payload; the admin endpoint accepts tokens
+    // valid for 24 hours (Python's max_age=60*60*24).
+    let token = match state.signer.sign(&json!({"logged": true})) {
+        Ok(t) => t,
+        Err(e) => {
+            return ApiError::Internal(anyhow::anyhow!("sign: {e}")).into_response();
+        }
+    };
+    // Compute the redirect target: current URL with "/login/" → "/admin/".
+    let location = redirect_to_admin(&headers);
+    let cookie = super::build_cookie("admin-session", &token, 60 * 60 * 24, &state.config);
+    let x_cookie = super::build_cookie("isso-admin-session", &token, 60 * 60 * 24, &state.config);
+
+    let mut resp = (StatusCode::SEE_OTHER, "").into_response();
+    resp.headers_mut().insert(
+        header::LOCATION,
+        location
+            .parse()
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("/admin/")),
+    );
+    resp.headers_mut().append(header::SET_COOKIE, cookie);
+    resp.headers_mut().append("X-Set-Cookie", x_cookie);
+    resp
+}
+
+fn redirect_to_admin(headers: &HeaderMap) -> String {
+    // Use the Host + protocol the request came in on; fall back to "/admin/".
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // We always redirect to /admin/ at the same host.
+    if host.is_empty() {
+        "/admin/".into()
+    } else {
+        // Browsers accept a relative URL here; keep it path-only so behind a
+        // reverse proxy with path rewriting we don't strand the user.
+        "/admin/".into()
+    }
+}
+
+fn render_login_or_disabled(state: &AppState) -> Response {
+    let template = if state.config.admin.enabled {
+        "login.html"
+    } else {
+        "disabled.html"
+    };
+    render_admin_template(
+        state,
+        template,
+        context! { isso_host_script => isso_host_script(state) },
+    )
+}
+
+fn isso_host_script(state: &AppState) -> String {
+    if state.config.server.public_endpoint.is_empty() {
+        state
+            .config
+            .general
+            .hosts
+            .first()
+            .cloned()
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string()
+    } else {
+        state
+            .config
+            .server
+            .public_endpoint
+            .trim_end_matches('/')
+            .to_string()
+    }
+}
+
+fn render_admin_template(
+    _state: &AppState,
+    template: &str,
+    ctx: impl serde::Serialize,
+) -> Response {
+    let env = crate::templates::env();
+    let tmpl = match env.get_template(template) {
+        Ok(t) => t,
+        Err(e) => return ApiError::Internal(anyhow::anyhow!("template load: {e}")).into_response(),
+    };
+    let rendered = match tmpl.render(ctx) {
+        Ok(s) => s,
+        Err(e) => {
+            return ApiError::Internal(anyhow::anyhow!("template render: {e}")).into_response()
+        }
+    };
+    let mut resp = (StatusCode::OK, rendered).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    resp
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminQuery {
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default)]
+    order_by: Option<String>,
+    #[serde(default)]
+    asc: Option<i64>,
+    #[serde(default)]
+    mode: Option<i64>,
+    #[serde(default)]
+    comment_search_url: Option<String>,
+}
+
+/// `GET /admin/` — HTML admin dashboard. Validates the admin-session cookie
+/// and renders admin.html with the comment listing. The template relies on
+/// `/js/admin.js` at the same host for client-side actions (edit, delete,
+/// validate). We don't bundle static assets in isso-rs — operators serve the
+/// isso JS from the Python package or their own static tree.
+pub async fn admin(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<AdminQuery>,
+) -> Response {
+    let isso_host = isso_host_script(&state);
+    if !state.config.admin.enabled {
+        return render_admin_template(
+            &state,
+            "disabled.html",
+            context! { isso_host_script => isso_host },
+        );
+    }
+
+    // Validate the admin-session cookie.
+    let cookie = cookie_for_name("admin-session", &headers);
+    let logged = cookie
+        .and_then(|tok| {
+            state
+                .signer
+                .unsign::<Value>(&tok, Some(60 * 60 * 24), now_unix() as u64)
+                .ok()
+        })
+        .and_then(|v| v.get("logged").and_then(|l| l.as_bool()))
+        .unwrap_or(false);
+    if !logged {
+        return render_admin_template(
+            &state,
+            "login.html",
+            context! { isso_host_script => isso_host },
+        );
+    }
+
+    // Query parameters.
+    let page = q.page.unwrap_or(0).max(0);
+    let order_by_str = q.order_by.unwrap_or_else(|| "created".into());
+    let order_by = match order_by_str.as_str() {
+        "id" => cmt::AdminOrderBy::Id,
+        "created" => cmt::AdminOrderBy::Created,
+        "modified" => cmt::AdminOrderBy::Modified,
+        "likes" => cmt::AdminOrderBy::Likes,
+        "dislikes" => cmt::AdminOrderBy::Dislikes,
+        "tid" => cmt::AdminOrderBy::Tid,
+        _ => cmt::AdminOrderBy::Created,
+    };
+    let asc = q.asc.unwrap_or(0) != 0;
+    let mode = q.mode.unwrap_or(2);
+    let comment_search_url = q.comment_search_url.clone().unwrap_or_default();
+
+    let (search_comment_id, search_uri) = if comment_search_url.is_empty() {
+        (None, None)
+    } else {
+        parse_search_url(&comment_search_url)
+    };
+    let params = cmt::AdminFetchParams {
+        mode,
+        order_by,
+        asc,
+        limit: 100,
+        page,
+        comment_id: search_comment_id,
+        thread_uri: search_uri.as_deref(),
+    };
+
+    let rows = match cmt::fetch_admin(&state.db, &params).await {
+        Ok(r) => r,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    let counts = match cmt::count_by_mode(&state.db).await {
+        Ok(c) => c,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+
+    let comments_ctx: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let c = &row.comment;
+            let hash = state
+                .signer
+                .sign(&c.id)
+                .unwrap_or_else(|_| String::from("<sign-failed>"));
+            json!({
+                "id": c.id,
+                "tid": c.tid,
+                "title": row.title,
+                "uri": row.uri,
+                "parent": c.parent,
+                "created": c.created,
+                "modified": c.modified,
+                "mode": c.mode,
+                "author": c.author,
+                "email": c.email,
+                "website": c.website,
+                "text": c.text,
+                "likes": c.likes,
+                "dislikes": c.dislikes,
+                "hash": hash,
+            })
+        })
+        .collect();
+    // The template uses {{counts.valid}} / {{counts.pending}} / {{counts.staled}}
+    // — named fields keyed by mode (1/2/4). Materialize that here so the
+    // template doesn't need a `dict.get(key, default)` lookup.
+    let map: std::collections::HashMap<i64, i64> = counts.iter().copied().collect();
+    let counts_ctx = json!({
+        "valid": map.get(&1).copied().unwrap_or(0),
+        "pending": map.get(&2).copied().unwrap_or(0),
+        "staled": map.get(&4).copied().unwrap_or(0),
+    });
+    let max_page = counts.iter().map(|(_, n)| n).sum::<i64>() / 100;
+
+    let conf_public = json!({
+        "avatar": false,
+        "votes": true,
+    });
+
+    render_admin_template(
+        &state,
+        "admin.html",
+        context! {
+            isso_host_script => isso_host,
+            comments => comments_ctx,
+            counts => counts_ctx,
+            page => page,
+            mode => mode,
+            max_page => max_page,
+            order_by => order_by_str,
+            asc => asc as i64,
+            comment_search_url => comment_search_url,
+            conf => conf_public,
+        },
+    )
+}
+
+fn cookie_for_name(name: &str, headers: &HeaderMap) -> Option<String> {
+    let hdr = headers.get(header::COOKIE)?.to_str().ok()?;
+    for part in hdr.split(';') {
+        let (k, v) = part.trim().split_once('=')?;
+        if k == name {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// Parse a comment URL `http://site/path#isso-<id>` into `(comment_id, thread_uri)`.
+/// If the fragment is missing, only `thread_uri` is populated.
+fn parse_search_url(url: &str) -> (Option<i64>, Option<String>) {
+    let parsed = match url::Url::parse(url) {
+        Ok(p) => p,
+        Err(_) => return (None, None),
+    };
+    let path = if parsed.path().is_empty() {
+        None
+    } else {
+        Some(parsed.path().to_string())
+    };
+    let fragment = parsed.fragment().unwrap_or("");
+    let id = fragment
+        .rsplit('-')
+        .next()
+        .and_then(|s| s.parse::<i64>().ok());
+    (id, path)
+}
+
+/// Render a unix timestamp as `YYYY-MM-DDTHH:MM:SSZ` (UTC, second-resolution).
+/// Matches the Python `datetime.fromtimestamp(ts).isoformat() + "Z"` output.
+fn iso8601_utc(ts: f64) -> String {
+    if ts <= 0.0 {
+        return "1970-01-01T01:00:00Z".to_string();
+    }
+    use time::OffsetDateTime;
+    let secs = ts as i64;
+    let odt = OffsetDateTime::from_unix_timestamp(secs).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        odt.year(),
+        odt.month() as u8,
+        odt.day(),
+        odt.hour(),
+        odt.minute(),
+        odt.second(),
+    )
 }
