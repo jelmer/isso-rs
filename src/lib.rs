@@ -10,3 +10,4 @@ pub mod notify;
 pub mod server;
 pub mod signer;
 pub mod templates;
+pub mod thread_title;

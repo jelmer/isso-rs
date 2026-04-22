@@ -79,4 +79,12 @@ EXPOSE 8080
 # passed on the command line.
 ENV ISSO_SETTINGS=/config/isso.cfg
 
+# Force binding to all interfaces — a config that says
+# `listen = http://localhost:8080` (including the default config) would
+# otherwise bind the container's loopback, which `docker run -p` can't
+# reach. Operators who mount a config with a different listen can
+# override with `-e ISSO_LISTEN=http://0.0.0.0:9000` or unset it entirely
+# (`--env ISSO_LISTEN=`).
+ENV ISSO_LISTEN=http://0.0.0.0:8080
+
 ENTRYPOINT ["/usr/local/bin/isso"]

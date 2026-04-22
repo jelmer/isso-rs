@@ -88,7 +88,16 @@ async fn run_serve(config_paths: Vec<PathBuf>) -> anyhow::Result<()> {
             .collect::<anyhow::Result<_>>()?
     };
 
-    let listen = configs[0].server.listen.clone();
+    // `[server] listen` comes from the first config, but `$ISSO_LISTEN`
+    // (if set and non-empty) wins — the Docker image uses this to force
+    // `http://0.0.0.0:8080` without requiring operators to edit their
+    // config for containerised use. Setting ISSO_LISTEN to the empty
+    // string falls back to config, so operators can unset the image's
+    // default with `--env ISSO_LISTEN=`.
+    let listen = match std::env::var("ISSO_LISTEN") {
+        Ok(v) if !v.is_empty() => v,
+        _ => configs[0].server.listen.clone(),
+    };
 
     let app = if configs.len() == 1 {
         server::build_app(configs.into_iter().next().unwrap()).await?

@@ -351,19 +351,42 @@ pub async fn new_comment(
         }
     });
 
-    // Ensure a thread row exists. Python fetches the page title via HTTP
-    // when no title is provided — that's network I/O we don't want in MVP,
-    // so we require `title` or reject with the same error Python would.
-    let thread = match threads::get_by_uri(&state.db, &q.uri).await? {
-        Some(t) => t,
+    // Ensure a thread row exists. Clients that can set `data-title` on the
+    // `#isso-thread` element (isso.js does this automatically when the
+    // attribute is present) short-circuit the HTTP fetch by sending the
+    // `title` in the body. Otherwise we GET the page from the first
+    // configured host that replies and parse a title out of the response,
+    // matching isso/views/comments.py::new + isso/utils/parse.py.
+    //
+    // The parser can also rewrite the thread URI via `data-isso-id` — we
+    // re-check the DB after the fetch in case the canonical URI already
+    // has a thread.
+    let (thread_uri, thread) = match threads::get_by_uri(&state.db, &q.uri).await? {
+        Some(t) => (q.uri.clone(), t),
         None => {
-            let title = body.title.as_deref().ok_or_else(|| {
-                ApiError::BadRequest(format!(
-                    "Cannot create new thread: URI {} has no title. Provide `title` in the request body.",
-                    q.uri
-                ))
-            })?;
-            threads::new_thread(&state.db, &q.uri, Some(title)).await?
+            let resolved = if let Some(title) = body.title.as_deref().filter(|s| !s.is_empty()) {
+                crate::thread_title::ResolvedThread {
+                    uri: q.uri.clone(),
+                    title: title.to_string(),
+                }
+            } else {
+                crate::thread_title::fetch(&state.config.general.hosts, &q.uri)
+                    .await
+                    .ok_or_else(|| {
+                        ApiError::BadRequest(format!(
+                            "Cannot create new thread: URI {} is not accessible and no title was provided. Please provide a title parameter in your request.",
+                            q.uri
+                        ))
+                    })?
+            };
+            match threads::get_by_uri(&state.db, &resolved.uri).await? {
+                Some(t) => (resolved.uri, t),
+                None => {
+                    let t = threads::new_thread(&state.db, &resolved.uri, Some(&resolved.title))
+                        .await?;
+                    (resolved.uri, t)
+                }
+            }
         }
     };
 
@@ -401,7 +424,7 @@ pub async fn new_comment(
         website: website.as_deref(),
         notification: body.notification,
     };
-    let inserted = cmt::add(&state.db, &q.uri, now, &new_c).await?;
+    let inserted = cmt::add(&state.db, &thread_uri, now, &new_c).await?;
 
     // Fire notification hooks (stdout log, SMTP admin email). The notifier
     // does its own work on a tokio task so this doesn't block the response.
