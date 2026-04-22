@@ -21,6 +21,8 @@ node_modules/
 
 # Database
 comments.db
+# docker-compose.yml bind-mounts ./db/ into the isso-server container.
+/db/
 
 # github/gitignore
 # Byte-compiled / optimized / DLL files
