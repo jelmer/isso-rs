@@ -51,7 +51,22 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Python Isso reads its config path from `$ISSO_SETTINGS` (split on `;`
+    // for multi-site). Mirror that fallback so existing deployment recipes
+    // that set the env var keep working when switched over to isso-rs.
+    // Explicit `-c` flags still win — this only fills in when none were given.
+    if cli.config.is_empty() {
+        if let Ok(settings) = std::env::var("ISSO_SETTINGS") {
+            cli.config = settings
+                .split(';')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect();
+        }
+    }
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => run_serve(cli.config).await,

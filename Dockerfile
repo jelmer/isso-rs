@@ -73,5 +73,10 @@ RUN mkdir /db /config && chmod 1777 /db /config
 VOLUME /db /config
 EXPOSE 8080
 
+# Default config path, matching the Python image's convention. Override
+# with `-e ISSO_SETTINGS=/path/to/other.cfg` (semicolon-separated for
+# multi-site). `isso` reads ISSO_SETTINGS as a fallback when no `-c` is
+# passed on the command line.
+ENV ISSO_SETTINGS=/config/isso.cfg
+
 ENTRYPOINT ["/usr/local/bin/isso"]
-CMD ["-c", "/config/isso.cfg"]
