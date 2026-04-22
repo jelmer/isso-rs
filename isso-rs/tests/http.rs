@@ -82,6 +82,69 @@ async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn cors_echoes_matching_origin() {
+    // Two configured hosts; the caller's Origin matches the second, so we
+    // expect it back verbatim in Access-Control-Allow-Origin.
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.general.hosts = vec!["https://example.tld/".into(), "http://example.tld/".into()];
+        c
+    });
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/config")
+                .header(header::ORIGIN, "http://example.tld")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers().get("access-control-allow-origin").unwrap(),
+        "http://example.tld"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-credentials")
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(
+        resp.headers().get("access-control-allow-methods").unwrap(),
+        "HEAD, GET, POST, PUT, DELETE"
+    );
+}
+
+#[tokio::test]
+async fn cors_preflight_short_circuits() {
+    let app = router(test_state().await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/new?uri=/x")
+                .header(header::ORIGIN, "http://localhost:8080")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Every CORS header is present even though no handler matched OPTIONS.
+    for hdr in [
+        "access-control-allow-origin",
+        "access-control-allow-credentials",
+        "access-control-allow-methods",
+    ] {
+        assert!(resp.headers().contains_key(hdr), "missing header: {hdr}");
+    }
+}
+
+#[tokio::test]
 async fn get_config_returns_public_knobs() {
     let app = router(test_state().await);
     let resp = app

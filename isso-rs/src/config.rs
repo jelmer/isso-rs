@@ -176,13 +176,18 @@ impl Default for Config {
 impl Config {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let ini = Ini::load_from_file(path)?;
-        let mut cfg = Self::default();
-        cfg.merge_ini(&ini)?;
-        Ok(cfg)
+        Self::from_ini(ini)
     }
 
     pub fn parse(s: &str) -> anyhow::Result<Self> {
         let ini = Ini::load_from_str(s)?;
+        Self::from_ini(ini)
+    }
+
+    fn from_ini(ini: Ini) -> anyhow::Result<Self> {
+        // Expand $VAR / ${VAR} in every value before merging, matching Python's
+        // `IssoParser.get` which runs os.path.expandvars on every lookup.
+        let ini = expand_ini_env_vars(ini);
         let mut cfg = Self::default();
         cfg.merge_ini(&ini)?;
         Ok(cfg)
@@ -361,6 +366,68 @@ fn split_commas(v: &str) -> Vec<String> {
         .collect()
 }
 
+/// Walk every value in the Ini file and substitute env vars in place.
+fn expand_ini_env_vars(mut ini: Ini) -> Ini {
+    for (_section, props) in ini.iter_mut() {
+        for (_key, value) in props.iter_mut() {
+            let expanded = expand_env_vars(value);
+            if expanded != *value {
+                *value = expanded;
+            }
+        }
+    }
+    ini
+}
+
+/// Reproduce Python's `os.path.expandvars`: substitute `$NAME` or `${NAME}`
+/// from the process environment. Unknown names are left untouched.
+/// Matches CPython's implementation: bare `$` with no valid identifier
+/// following it is also left untouched.
+pub fn expand_env_vars(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        // `${NAME}` form.
+        if bytes.get(i + 1) == Some(&b'{') {
+            if let Some(close) = input[i + 2..].find('}') {
+                let name = &input[i + 2..i + 2 + close];
+                match std::env::var(name) {
+                    Ok(val) => out.push_str(&val),
+                    Err(_) => out.push_str(&input[i..i + 2 + close + 1]),
+                }
+                i += 2 + close + 1;
+                continue;
+            }
+            out.push('$');
+            i += 1;
+            continue;
+        }
+        // `$NAME` form — read an identifier [A-Za-z_][A-Za-z0-9_]*.
+        let mut end = i + 1;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        if end == i + 1 {
+            out.push('$');
+            i += 1;
+            continue;
+        }
+        let name = &input[i + 1..end];
+        match std::env::var(name) {
+            Ok(val) => out.push_str(&val),
+            Err(_) => out.push_str(&input[i..end]),
+        }
+        i = end;
+    }
+    out
+}
+
 fn parse_bool(v: &str) -> anyhow::Result<bool> {
     match v.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -433,6 +500,24 @@ mod tests {
             parse_timedelta("1w").unwrap(),
             Duration::from_secs(7 * 86400)
         );
+    }
+
+    #[test]
+    fn env_var_expansion_applies_to_config_values() {
+        // Use a test-scoped env var we set ourselves to keep the test
+        // independent of the host environment.
+        std::env::set_var("ISSO_TEST_DBPATH", "/mnt/volume/comments.db");
+        let cfg = Config::parse("[general]\ndbpath = $ISSO_TEST_DBPATH\n").unwrap();
+        assert_eq!(cfg.general.dbpath, "/mnt/volume/comments.db");
+
+        // Braced form too.
+        std::env::set_var("ISSO_TEST_SALT", "s3cret");
+        let cfg = Config::parse("[hash]\nsalt = ${ISSO_TEST_SALT}\n").unwrap();
+        assert_eq!(cfg.hash.salt, "s3cret");
+
+        // Unknown names are left untouched (Python's expandvars behaviour).
+        let cfg = Config::parse("[general]\ndbpath = $UNKNOWN_ABCXYZ\n").unwrap();
+        assert_eq!(cfg.general.dbpath, "$UNKNOWN_ABCXYZ");
     }
 
     #[test]

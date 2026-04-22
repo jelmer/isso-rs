@@ -127,11 +127,13 @@ fn render_comment(c: Comment, state: &AppState, render_html: bool) -> CommentJso
         .unwrap_or_default();
     let hash = state.hasher.uhash(&hash_input);
     let gravatar_image = if state.config.general.gravatar {
+        // Python `gravatar-url` contains `{}` where the MD5 of the email (or
+        // author name, whichever is set first) goes. Gravatar requires MD5
+        // specifically — not the configured `[hash] algorithm`.
+        use md5::Digest as _;
         let email_or_author = c.email.clone().or(c.author.clone()).unwrap_or_default();
-        // TODO: gravatar uses MD5 specifically; our Hasher doesn't implement md5.
-        // Leave as None for now — wiring md5 is cheap but not load-bearing for MVP.
-        let _ = email_or_author;
-        None
+        let md5_hex = hex::encode(md5::Md5::digest(email_or_author.as_bytes()));
+        Some(state.config.general.gravatar_url.replace("{}", &md5_hex))
     } else {
         None
     };

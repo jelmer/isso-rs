@@ -76,8 +76,104 @@ pub fn router(state: AppState) -> Router {
         .route("/id/:id", delete(handlers::delete_comment))
         .route("/id/:id/like", post(handlers::like))
         .route("/id/:id/dislike", post(handlers::dislike))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            cors_middleware,
+        ))
         .layer(middleware::from_fn(csrf_guard))
         .with_state(state)
+}
+
+/// CORS middleware mirroring isso/wsgi.py::CORSMiddleware.
+///
+/// - Echoes the caller's `Origin` header back in `Access-Control-Allow-Origin`
+///   *if* it's in the configured `[general] host` list; otherwise reports
+///   the first configured host.
+/// - Always emits `Access-Control-Allow-Credentials: true` (cookies cross
+///   origins in the JS frontend's typical setup).
+/// - For preflight `OPTIONS`, short-circuits with 200 plus the headers —
+///   matches Python which bypasses the inner app on OPTIONS.
+async fn cors_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    const ALLOW_METHODS: &str = "HEAD, GET, POST, PUT, DELETE";
+
+    let origin_hdr = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    // Pick the Allow-Origin value: echo the caller's Origin if it matches
+    // one of the configured hosts (after normalising to scheme://netloc),
+    // else fall back to the first configured host.
+    let allow_origin = resolve_allow_origin(origin_hdr.as_deref(), &state.config.general.hosts);
+
+    let is_preflight = req.method() == Method::OPTIONS;
+    let mut resp = if is_preflight {
+        (StatusCode::OK, "").into_response()
+    } else {
+        next.run(req).await
+    };
+
+    let headers = resp.headers_mut();
+    if let Some(origin) = allow_origin {
+        if let Ok(v) = HeaderValue::from_str(&origin) {
+            headers.insert("access-control-allow-origin", v);
+        }
+    }
+    headers.insert(
+        "access-control-allow-credentials",
+        HeaderValue::from_static("true"),
+    );
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static(ALLOW_METHODS),
+    );
+    // Mirror Python's allowed/exposed config: Isso core doesn't set these by
+    // default, so we leave them unset unless a future config knob arrives.
+    resp
+}
+
+fn resolve_allow_origin(origin: Option<&str>, hosts: &[String]) -> Option<String> {
+    let configured: Vec<(String, Option<u16>, bool)> =
+        hosts.iter().filter_map(|h| split_origin(h)).collect();
+    if configured.is_empty() {
+        return origin.map(String::from);
+    }
+    if let Some(origin) = origin {
+        if let Some(o) = split_origin(origin) {
+            if configured.iter().any(|c| c == &o) {
+                return Some(join_origin(&o));
+            }
+        }
+    }
+    configured.first().map(join_origin)
+}
+
+fn split_origin(s: &str) -> Option<(String, Option<u16>, bool)> {
+    let url = if s.starts_with("http://") || s.starts_with("https://") {
+        url::Url::parse(s).ok()?
+    } else {
+        url::Url::parse(&format!("http://{s}")).ok()?
+    };
+    Some((
+        url.host_str()?.to_string(),
+        url.port(),
+        url.scheme() == "https",
+    ))
+}
+
+fn join_origin(parts: &(String, Option<u16>, bool)) -> String {
+    let scheme = if parts.2 { "https" } else { "http" };
+    match parts.1 {
+        Some(port) if (parts.2 && port != 443) || (!parts.2 && port != 80) => {
+            format!("{scheme}://{}:{port}", parts.0)
+        }
+        _ => format!("{scheme}://{}", parts.0),
+    }
 }
 
 /// Mirror Python's `xhr` decorator: reject mutating requests whose
@@ -176,4 +272,51 @@ pub fn build_cookie(name: &str, value: &str, max_age: i64, config: &Config) -> H
     let secure = if is_https { "; Secure" } else { "" };
     let raw = format!("{name}={value}; Path=/; Max-Age={max_age}; SameSite={samesite}{secure}");
     HeaderValue::from_str(&raw).expect("cookie header value is ASCII")
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+
+    #[test]
+    fn echoes_origin_when_in_configured_hosts() {
+        let hosts = vec!["https://example.tld/".into(), "http://example.tld/".into()];
+        assert_eq!(
+            resolve_allow_origin(Some("https://example.tld"), &hosts),
+            Some("https://example.tld".to_string())
+        );
+        assert_eq!(
+            resolve_allow_origin(Some("http://example.tld"), &hosts),
+            Some("http://example.tld".to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_first_host_on_mismatch() {
+        // Python's CORSMiddleware returns hosts[0] when the caller's Origin
+        // isn't whitelisted — tested by test_cors.py::test_simple case `c`.
+        let hosts = vec!["https://example.tld/".into(), "http://example.tld/".into()];
+        assert_eq!(
+            resolve_allow_origin(Some("http://foo.other"), &hosts),
+            Some("https://example.tld".to_string())
+        );
+    }
+
+    #[test]
+    fn non_default_port_is_preserved() {
+        let hosts = vec!["http://localhost:8080/".into()];
+        assert_eq!(
+            resolve_allow_origin(Some("http://localhost:8080"), &hosts),
+            Some("http://localhost:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn missing_origin_falls_back_to_first() {
+        let hosts = vec!["https://example.tld/".into()];
+        assert_eq!(
+            resolve_allow_origin(None, &hosts),
+            Some("https://example.tld".to_string())
+        );
+    }
 }

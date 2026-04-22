@@ -6,10 +6,12 @@
 //! supports.
 
 use hmac::Hmac;
+use md5::Md5;
 use pbkdf2::pbkdf2;
 use sha1::Sha1;
 
 type HmacSha1 = Hmac<Sha1>;
+type HmacMd5 = Hmac<Md5>;
 
 #[derive(Debug, Clone)]
 pub enum Hasher {
@@ -59,9 +61,10 @@ impl Hasher {
                 Some(v) if !v.is_empty() => v.to_string(),
                 _ => "sha1".to_string(),
             };
-            if func != "sha1" {
-                // Python supports arbitrary hashlib names; we only wire sha1 for now.
-                // TODO: support sha256, sha512, etc. under pbkdf2.
+            if !matches!(func.as_str(), "sha1" | "md5") {
+                // Python supports arbitrary hashlib names; we wire sha1 + md5
+                // (the two the Python test suite exercises). If a deployment
+                // ever needs sha256/sha512 under pbkdf2 we'd add it here.
                 anyhow::bail!("pbkdf2 with func={func} not implemented yet");
             }
             return Ok(Hasher::Pbkdf2(Pbkdf2Params {
@@ -84,17 +87,18 @@ impl Hasher {
                 sha1::Sha1::digest(bytes).to_vec()
             }
             Hasher::Md5 => {
-                // md5 requires pulling in the md-5 crate; emulate via a simple impl
-                // only if someone actually enables it. Keep it behind a TODO so
-                // nobody silently picks up an unsupported config.
-                // TODO: add md-5 dependency if any deployment actually uses md5.
-                panic!("md5 hasher not implemented");
+                use md5::Digest as _;
+                Md5::digest(bytes).to_vec()
             }
             Hasher::Pbkdf2(p) => {
                 let mut out = vec![0u8; p.dklen];
-                // pbkdf2 crate returns Result in newer versions
-                pbkdf2::<HmacSha1>(bytes, &p.salt, p.iterations, &mut out)
-                    .expect("pbkdf2 output length is valid");
+                match p.func.as_str() {
+                    "md5" => pbkdf2::<HmacMd5>(bytes, &p.salt, p.iterations, &mut out)
+                        .expect("pbkdf2 output length is valid"),
+                    // Default + explicit "sha1": use HMAC-SHA1 (matches Python's default).
+                    _ => pbkdf2::<HmacSha1>(bytes, &p.salt, p.iterations, &mut out)
+                        .expect("pbkdf2 output length is valid"),
+                }
                 out
             }
         };
@@ -141,5 +145,27 @@ mod tests {
     fn none_returns_input_hex() {
         let h = Hasher::from_config("none", "").unwrap();
         assert_eq!(h.uhash("abc"), hex::encode(b"abc"));
+    }
+
+    #[test]
+    fn md5_matches_python_hashlib() {
+        // python3 -c 'import hashlib; print(hashlib.md5(b"hello").hexdigest())'
+        let h = Hasher::from_config("md5", "unused").unwrap();
+        assert_eq!(h.uhash("hello"), "5d41402abc4b2a76b9719d911017c592");
+    }
+
+    #[test]
+    fn pbkdf2_with_md5_matches_python() {
+        // python3 -c 'import hashlib;
+        //   print(hashlib.pbkdf2_hmac("md5", b"hello", b"salt", 16, 2).hex())'
+        // -> 3551
+        let h = Hasher::from_config("pbkdf2:16:2:md5", "salt").unwrap();
+        assert_eq!(h.uhash("hello"), "3551");
+    }
+
+    #[test]
+    fn unknown_algorithm_errors() {
+        // Python raises ValueError via the factory; we bail with anyhow.
+        assert!(Hasher::from_config("foo", "s").is_err());
     }
 }
