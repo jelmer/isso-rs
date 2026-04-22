@@ -1,8 +1,27 @@
 Changelog for Isso
 ==================
 
-Unreleased
-----------
+0.1.1 (2026-04-23)
+------------------
+
+- Fetch thread titles over HTTP when ``POST /new`` omits ``title``, with
+  fetch failures logged via ``tracing`` and surfaced in the 400 response.
+  (jelmer)
+- Roll our own ``RawConfigParser``-compatible INI parser so config files
+  written for the Python implementation keep loading byte-for-byte the
+  same way. (jelmer)
+- Resolve the ``[server] listen`` address via DNS so hostnames (not just
+  literal IPs) are accepted. (jelmer)
+- Honour ``$ISSO_SETTINGS`` as a config-path fallback, matching the
+  Python entry point. (jelmer)
+- Docker: ship ``css/``, ``img/`` and ``demo/`` in the runtime image
+  (previously only ``js/`` was copied), and publish the image to
+  ``ghcr.io/jelmer/isso-rs`` from CI. (jelmer)
+- Build Docker images with ``buildah`` instead of ``docker`` in the
+  ``Makefile``. (jelmer)
+
+0.1.0 (2026-04-22)
+------------------
 
 Rust port
 ^^^^^^^^^
