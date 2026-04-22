@@ -108,10 +108,10 @@ apidoc: $(APIDOC_SRC)
 
 # --------------------------------------------------------------------- Docker
 docker:
-	DOCKER_BUILDKIT=1 docker build -t $(ISSO_IMAGE) .
+	DOCKER_BUILDKIT=1 buildah build -t $(ISSO_IMAGE) .
 
 docker-release:
-	DOCKER_BUILDKIT=1 docker build -t $(ISSO_IMAGE) .
+	DOCKER_BUILDKIT=1 buildah build -t $(ISSO_IMAGE) .
 
 docker-run:
 	docker run -d --rm --name isso -p 127.0.0.1:8080:8080 \
