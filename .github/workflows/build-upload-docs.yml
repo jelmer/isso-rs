@@ -10,13 +10,11 @@ on:
     paths:
       - "docs/**"
       - "apidoc/**"
-      - "isso/views/comments.py"
       - ".github/workflows/build-upload-docs.yml"
   pull_request:
     paths:
       - "docs/**"
       - "apidoc/**"
-      - "isso/views/comments.py"
       - ".github/workflows/build-upload-docs.yml"
 
 jobs:
