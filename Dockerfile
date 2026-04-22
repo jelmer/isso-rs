@@ -61,8 +61,13 @@ WORKDIR /isso/
 COPY --from=isso-builder /usr/local/bin/isso /usr/local/bin/isso
 COPY --from=isso-builder /src/templates/ /isso/templates/
 COPY --from=isso-builder /src/isso.cfg /isso/isso.cfg
-# Merge the compiled JS bundles from stage 1 into the static tree.
-COPY --from=isso-js /src/static/ /isso/static/
+# CSS / images / demo come straight from the build context; the JS bundles
+# built in stage 1 land alongside them in /isso/static/js/. Stage 1 only
+# produces JS, so copying the whole `static/` from it would drop css/img/demo.
+COPY ["static/css/", "/isso/static/css/"]
+COPY ["static/img/", "/isso/static/img/"]
+COPY ["static/demo/", "/isso/static/demo/"]
+COPY --from=isso-js /src/static/js/ /isso/static/js/
 
 LABEL org.opencontainers.image.source=https://github.com/jelmer/isso-rs
 LABEL org.opencontainers.image.description="Isso – a lightweight, self-hosted commenting service"
