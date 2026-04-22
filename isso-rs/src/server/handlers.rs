@@ -80,6 +80,35 @@ pub async fn info() -> Json<Value> {
     }))
 }
 
+#[cfg(test)]
+mod url_regex_tests {
+    use super::is_url;
+
+    /// Behaviour captured verbatim from Python's isurl() — same inputs,
+    /// same accept/reject verdicts.
+    #[test]
+    fn accepts_and_rejects_like_python() {
+        let cases = &[
+            ("http://example.com", true),
+            ("http://example.com/", true),
+            ("https://example.com/foo", true),
+            ("example.com", true),
+            ("localhost", true),
+            ("localhost:8080", true),
+            ("http://192.168.1.1/", true),
+            ("javascript:alert(1)", false),
+            ("not a url at all", false),
+            ("http://example", false),
+            ("ftp://example.com", false),
+            ("http://example.com with space", false),
+            ("", false),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(is_url(url), *expected, "url={url:?}");
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct NewQuery {
     uri: String,
@@ -192,10 +221,42 @@ fn verify_comment(
         if website.len() > 254 {
             return Err("arbitrary length limit".into());
         }
-        // TODO: port the Django URL regex from views/comments.py for strict match.
+        if !website.is_empty() && !is_url(website) {
+            return Err("Website not Django-conform".into());
+        }
     }
     let _ = author;
     Ok(())
+}
+
+/// Match Python's `isurl` from isso/views/comments.py — a Django-style
+/// URL validator: optional scheme, domain or IPv4 or `localhost`, optional
+/// port, optional path/query.
+///
+/// The original regex is case-insensitive and uses Python's `\w` which
+/// includes Unicode letters. Rust's `regex` crate treats `\w` as ASCII by
+/// default — we enable `(?u)` so behaviour matches.
+fn is_url(text: &str) -> bool {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        // Direct port of isso/views/comments.py::__url_re.
+        // (?i) case-insensitive; (?u) unicode.
+        let pat = concat!(
+            r"(?iu)",
+            r"^",
+            r"(https?://)?",
+            // domain...
+            r"(?:(?:[\w](?:[\w-]{0,61}[\w])?\.)+(?:[\w]{2,6}\.?|[\w-]{2,}\.?)|",
+            r"localhost|",                          // localhost...
+            r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", // ...or IPv4
+            r"(?::\d+)?",                           // optional port
+            r"(?:/?|[/?]\S+)",
+            r"$",
+        );
+        regex::Regex::new(pat).expect("static URL regex compiles")
+    });
+    re.is_match(text)
 }
 
 fn now_unix() -> f64 {
