@@ -344,7 +344,9 @@ pub async fn new_comment(
 
     // Fire notification hooks (stdout log, SMTP admin email). The notifier
     // does its own work on a tokio task so this doesn't block the response.
-    state.notifier.comment_created(&thread, &inserted);
+    state
+        .notifier
+        .comment_created(&state.db, &thread, &inserted);
 
     let token = state
         .signer
@@ -832,7 +834,9 @@ pub async fn moderate_post(
             cmt::activate(&state.db, signed_id).await?;
             // Refresh after the update and fire the activate notification.
             if let Some(activated) = cmt::get(&state.db, signed_id).await? {
-                state.notifier.comment_activated(&thread, &activated);
+                state
+                    .notifier
+                    .comment_activated(&state.db, &thread, &activated);
             }
             Ok((StatusCode::OK, "Comment has been activated").into_response())
         }

@@ -5,26 +5,27 @@
 //! - **stdout**: log-line emission for new / edit / delete / activate events
 //!   with Delete/Activate URLs the operator can click through — useful for a
 //!   dev loop, matches Python's `Stdout` class.
-//! - **smtp**: emails sent on new-comment (to the admin) and on activate (to
-//!   parent-comment authors who opted in via `notification = 1`). Delivery is
-//!   best-effort: we fire-and-forget over a tokio task and log on failure.
+//! - **smtp**: admin email on new-comment; reply email to parent-comment
+//!   subscribers on activation. Delivery is best-effort: we fire-and-forget
+//!   over a tokio task and log on failure.
 //!
 //! The admin notification includes signed `Delete` / `Activate` URLs; the
-//! reply notification includes a signed `Unsubscribe` URL. Both use the same
-//! `Signer` that the HTTP layer uses for cookies, so the moderation endpoints
-//! (`/id/:id/(activate|delete)/:key`) accept them.
+//! reply notification includes a signed `Unsubscribe` URL *and* a
+//! `List-Unsubscribe` header carrying the same URL so modern mail clients
+//! expose a one-click unsubscribe.
 
 use std::sync::Arc;
 
-use lettre::message::header::ContentType;
+use lettre::message::header::{ContentType, HeaderName, HeaderValue};
 use lettre::message::{Mailbox, Message};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use serde_json::json;
+use sqlx::SqlitePool;
 
 use crate::config::{Config, Smtp};
-use crate::db::comments::Comment;
+use crate::db::comments::{self as cmt, Comment};
 use crate::db::threads::Thread;
 use crate::signer::Signer;
 
@@ -61,51 +62,50 @@ impl Notifier {
             .any(|n| n.eq_ignore_ascii_case("stdout"))
     }
 
-    fn public_endpoint(&self) -> &str {
+    fn public_endpoint(&self) -> String {
         if self.config.server.public_endpoint.is_empty() {
             self.config
                 .general
                 .hosts
                 .first()
-                .map(String::as_str)
-                .unwrap_or("")
+                .cloned()
+                .unwrap_or_default()
         } else {
-            &self.config.server.public_endpoint
+            self.config.server.public_endpoint.clone()
         }
         .trim_end_matches('/')
+        .to_string()
     }
 
     /// Fired after a new comment is persisted. Emits the admin SMTP email
-    /// (when configured), and stdout logs in all cases.
-    pub fn comment_created(&self, thread: &Thread, comment: &Comment) {
+    /// (when configured), and stdout logs in all cases. When the comment is
+    /// *already accepted* (mode=1) we also fan out reply-notifications here,
+    /// matching Python's `notify_new → notify_users if mode == 1`.
+    pub fn comment_created(&self, pool: &SqlitePool, thread: &Thread, comment: &Comment) {
         if self.wants_stdout() {
             self.stdout_new(thread, comment);
         }
         if self.wants_admin_smtp() {
             self.spawn_admin_email(thread.clone(), comment.clone());
         }
-        // If the comment is already accepted (not pending) we also fire the
-        // reply-notification path on insert — matches Python's notify_new.
         if self.wants_reply_smtp() && comment.mode == 1 {
-            // TODO: wire reply-notify fanout here once the HTTP layer can
-            // pass in the parent-comment context. Current MVP triggers only
-            // on activation (see comment_activated).
+            self.spawn_reply_fanout(pool.clone(), thread.clone(), comment.clone());
         }
     }
 
     /// Fired when a pending comment is activated by an admin. Sends reply
-    /// notifications to parent-comment authors who opted in.
-    pub fn comment_activated(&self, _thread: &Thread, _comment: &Comment) {
+    /// notifications unconditionally (the comment just became visible to
+    /// the world) when `[general] reply-notifications` is on.
+    pub fn comment_activated(&self, pool: &SqlitePool, thread: &Thread, comment: &Comment) {
         if self.wants_stdout() {
-            tracing::info!("comment activated (stdout notifier)");
+            tracing::info!("comment {} activated", comment.id);
         }
-        // TODO: SMTP reply notification. The HTTP moderation handler will
-        // resolve the parent comment and loop through notification subscribers;
-        // integrate from that call site so we only need one DB query.
+        if self.wants_reply_smtp() {
+            self.spawn_reply_fanout(pool.clone(), thread.clone(), comment.clone());
+        }
     }
 
     fn stdout_new(&self, thread: &Thread, comment: &Comment) {
-        // Match the line format from isso/ext/notifications.py::Stdout.
         tracing::info!(
             "new comment: {}",
             json!({
@@ -137,7 +137,7 @@ impl Notifier {
     fn spawn_admin_email(&self, thread: Thread, comment: Comment) {
         let config = Arc::clone(&self.config);
         let signer = Arc::clone(&self.signer);
-        let base = self.public_endpoint().to_string();
+        let base = self.public_endpoint();
         tokio::spawn(async move {
             let body = format_admin_body(&base, &thread, &comment, &signer);
             let subject = match &thread.title {
@@ -154,6 +154,82 @@ impl Notifier {
             }
         });
     }
+
+    /// Resolve subscribers for a reply and send one email to each unique
+    /// recipient. Runs on a tokio task so the HTTP response isn't blocked
+    /// waiting on SMTP.
+    fn spawn_reply_fanout(&self, pool: SqlitePool, thread: Thread, comment: Comment) {
+        // Nothing to fan out if the comment isn't a reply or has no email
+        // (we'd have nothing to exclude from the notified set in that case,
+        // but we still want fanout when the author didn't leave an email —
+        // they just don't self-filter).
+        let Some(parent_id) = comment.parent else {
+            return;
+        };
+        let config = Arc::clone(&self.config);
+        let signer = Arc::clone(&self.signer);
+        let base = self.public_endpoint();
+        tokio::spawn(async move {
+            let subscribers = match cmt::fetch_reply_subscribers(&pool, parent_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("reply fanout lookup failed: {e}");
+                    return;
+                }
+            };
+            let parent_comment = match cmt::get(&pool, parent_id).await {
+                Ok(Some(c)) => c,
+                Ok(None) => {
+                    tracing::warn!("reply fanout: parent {parent_id} missing");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!("reply fanout parent lookup failed: {e}");
+                    return;
+                }
+            };
+
+            let author_email = comment.email.as_deref().unwrap_or("");
+            let mut notified: Vec<String> = Vec::new();
+            for sub in &subscribers {
+                let Some(email) = sub.email.as_deref() else {
+                    continue;
+                };
+                if email.is_empty()
+                    || sub.id == comment.id
+                    || email == author_email
+                    || notified.iter().any(|e| e == email)
+                {
+                    continue;
+                }
+
+                let body =
+                    format_reply_body(&base, &thread, &comment, &parent_comment, email, &signer);
+                let subject = match &thread.title {
+                    Some(title) if !title.is_empty() => {
+                        format!("Re: New comment posted on {title}")
+                    }
+                    _ => "Re: New comment posted".to_string(),
+                };
+                let list_unsub = list_unsubscribe_url(&base, parent_id, email, &signer);
+                let extra = [("List-Unsubscribe".to_string(), format!("<{list_unsub}>"))];
+                if let Err(e) = send_email(&config.smtp, &subject, body, email, &extra).await {
+                    tracing::warn!("reply email to {email} failed: {e}");
+                }
+                notified.push(email.to_string());
+            }
+        });
+    }
+}
+
+fn list_unsubscribe_url(base: &str, parent_id: i64, recipient: &str, signer: &Signer) -> String {
+    let key = signer
+        .sign(&("unsubscribe", recipient))
+        .unwrap_or_else(|_| String::from("<sign-failed>"));
+    format!(
+        "{base}/id/{parent_id}/unsubscribe/{}/{key}",
+        urlencoding::encode(recipient)
+    )
 }
 
 /// Plain-text admin body. Matches the Python layout closely (author line,
@@ -199,23 +275,54 @@ fn format_admin_body(base: &str, thread: &Thread, comment: &Comment, signer: &Si
     out
 }
 
+/// Plain-text reply-notification body. Matches Python's `format(admin=False)`.
+fn format_reply_body(
+    base: &str,
+    thread: &Thread,
+    comment: &Comment,
+    parent: &Comment,
+    recipient: &str,
+    signer: &Signer,
+) -> String {
+    let mut out = String::new();
+    let author = match comment.author.as_deref() {
+        Some(a) if !a.is_empty() => a.to_string(),
+        _ => "Anonymous".to_string(),
+    };
+    out.push_str(&format!("{author} wrote:\n\n"));
+    out.push_str(&comment.text);
+    out.push_str("\n\n");
+    out.push_str(&format!(
+        "Link to comment: {base}{}#isso-{}\n\n---\n",
+        thread.uri, comment.id
+    ));
+    out.push_str(&format!(
+        "Unsubscribe from this conversation: {}\n",
+        list_unsubscribe_url(base, parent.id, recipient, signer)
+    ));
+    out
+}
+
 async fn send_email(
     smtp: &Smtp,
     subject: &str,
     body: String,
     to: &str,
-    // TODO: extra headers (List-Unsubscribe for the reply-notification flow)
-    // once that flow is wired up end-to-end.
-    _extra_headers: &[(String, String)],
+    extra_headers: &[(String, String)],
 ) -> anyhow::Result<()> {
     let from: Mailbox = smtp.from.parse()?;
     let to: Mailbox = to.parse()?;
-    let msg = Message::builder()
+    let mut builder = Message::builder()
         .from(from)
         .to(to)
         .subject(subject)
-        .header(ContentType::TEXT_PLAIN)
-        .body(body)?;
+        .header(ContentType::TEXT_PLAIN);
+    for (name, value) in extra_headers {
+        let header_name = HeaderName::new_from_ascii(name.clone())
+            .map_err(|e| anyhow::anyhow!("invalid header name {name:?}: {e}"))?;
+        builder = builder.raw_header(HeaderValue::new(header_name, value.clone()));
+    }
+    let msg = builder.body(body)?;
 
     let transport = build_transport(smtp)?;
     transport.send(msg).await?;
@@ -297,7 +404,6 @@ mod tests {
             "got: {body}"
         );
         assert!(body.contains("Delete comment: https://comments.example.com/id/42/delete/"));
-        // Mode 2 (pending) must produce an Activate link.
         assert!(body.contains("Activate comment: https://comments.example.com/id/42/activate/"));
     }
 
@@ -313,6 +419,47 @@ mod tests {
         );
         assert!(body.contains("Delete comment"));
         assert!(!body.contains("Activate comment"));
+    }
+
+    #[test]
+    fn reply_body_is_recipient_specific() {
+        // Each recipient gets their own signed unsubscribe URL.
+        let signer = signer_for_tests();
+        let parent = Comment {
+            id: 10,
+            ..sample_comment()
+        };
+        let body_alice = format_reply_body(
+            "https://c.example",
+            &sample_thread(),
+            &sample_comment(),
+            &parent,
+            "alice@example.com",
+            &signer,
+        );
+        let body_bob = format_reply_body(
+            "https://c.example",
+            &sample_thread(),
+            &sample_comment(),
+            &parent,
+            "bob@example.com",
+            &signer,
+        );
+        assert!(body_alice.contains("alice%40example.com"));
+        assert!(body_bob.contains("bob%40example.com"));
+        assert!(body_alice
+            .contains("Unsubscribe from this conversation: https://c.example/id/10/unsubscribe/"));
+        assert_ne!(body_alice, body_bob);
+    }
+
+    #[test]
+    fn list_unsubscribe_url_is_signed_per_recipient() {
+        let signer = signer_for_tests();
+        let a = list_unsubscribe_url("https://c.example", 5, "a@b.com", &signer);
+        let b = list_unsubscribe_url("https://c.example", 5, "c@d.com", &signer);
+        assert!(a.starts_with("https://c.example/id/5/unsubscribe/a%40b.com/"));
+        assert!(b.starts_with("https://c.example/id/5/unsubscribe/c%40d.com/"));
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -343,8 +490,6 @@ mod tests {
         assert_eq!(n.public_endpoint(), "https://comments.other");
     }
 
-    /// Ensure build_transport accepts the three security modes without
-    /// actually opening a socket.
     #[test]
     fn build_transport_accepts_all_security_modes() {
         for sec in ["none", "starttls", "ssl"] {

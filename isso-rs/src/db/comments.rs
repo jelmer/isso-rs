@@ -442,6 +442,38 @@ pub async fn is_previously_approved_author(
 
 /// Comment count grouped by mode, returned as `(mode, count)` pairs.
 /// Used by the admin UI to label tabs with item counts.
+/// Fetch accepted siblings-of-parent (plus the parent itself) that subscribe
+/// to reply notifications (`notification = 1`) and have a non-empty email.
+/// Used by notify::comment_activated to fan out reply emails — matches
+/// isso/ext/notifications.py::SMTP.notify_users which builds the same set.
+///
+/// `parent_id` is the id of the comment the *new reply* replies to (i.e.
+/// `new_comment.parent`); we include the parent comment itself plus all
+/// comments whose parent == `parent_id` (same-level siblings of the new reply).
+///
+/// The caller is responsible for excluding the new reply itself and its
+/// author's email (a commenter posting under the same email as a subscriber
+/// shouldn't be notified of their own post).
+pub async fn fetch_reply_subscribers(
+    pool: &SqlitePool,
+    parent_id: i64,
+) -> sqlx::Result<Vec<Comment>> {
+    // Parent first, then siblings at the same level. Order doesn't matter
+    // functionally — we deduplicate by email downstream.
+    let rows = sqlx::query(
+        "SELECT * FROM comments \
+         WHERE mode = 1 \
+           AND email IS NOT NULL AND email != '' \
+           AND notification = 1 \
+           AND (id = ? OR parent = ?)",
+    )
+    .bind(parent_id)
+    .bind(parent_id)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_comment).collect()
+}
+
 pub async fn count_by_mode(pool: &SqlitePool) -> sqlx::Result<Vec<(i64, i64)>> {
     let rows: Vec<(i64, i64)> =
         sqlx::query_as("SELECT mode, COUNT(id) FROM comments GROUP BY mode")
@@ -951,6 +983,62 @@ mod tests {
         assert_eq!(updated.text, "second");
         assert_eq!(updated.modified, Some(2000.0));
         assert_eq!(updated.author, Some("orig".to_string())); // unchanged
+    }
+
+    #[tokio::test]
+    async fn fetch_reply_subscribers_filters_on_notification_and_mode() {
+        let pool = setup().await;
+        make_thread(&pool, "/a").await;
+        // Parent comment: has email, notification on, accepted.
+        let parent = add(
+            &pool,
+            "/a",
+            1000.0,
+            &NewComment {
+                email: Some("parent@ex"),
+                notification: 1,
+                ..sample_comment("root", "10.0.0.1")
+            },
+        )
+        .await
+        .unwrap();
+
+        // Sibling 1: notification on, accepted — include.
+        let mut sib1 = sample_comment("s1", "10.0.0.2");
+        sib1.email = Some("sib1@ex");
+        sib1.notification = 1;
+        sib1.parent = Some(parent.id);
+        add(&pool, "/a", 1001.0, &sib1).await.unwrap();
+
+        // Sibling 2: notification off — exclude.
+        let mut sib2 = sample_comment("s2", "10.0.0.3");
+        sib2.email = Some("sib2@ex");
+        sib2.notification = 0;
+        sib2.parent = Some(parent.id);
+        add(&pool, "/a", 1002.0, &sib2).await.unwrap();
+
+        // Sibling 3: pending (mode 2) — exclude.
+        let mut sib3 = sample_comment("s3", "10.0.0.4");
+        sib3.email = Some("sib3@ex");
+        sib3.notification = 1;
+        sib3.mode = MODE_PENDING;
+        sib3.parent = Some(parent.id);
+        add(&pool, "/a", 1003.0, &sib3).await.unwrap();
+
+        // Sibling 4: no email — exclude.
+        let mut sib4 = sample_comment("s4", "10.0.0.5");
+        sib4.email = None;
+        sib4.notification = 1;
+        sib4.parent = Some(parent.id);
+        add(&pool, "/a", 1004.0, &sib4).await.unwrap();
+
+        let subs = fetch_reply_subscribers(&pool, parent.id).await.unwrap();
+        let mut emails: Vec<Option<String>> = subs.iter().map(|c| c.email.clone()).collect();
+        emails.sort();
+        assert_eq!(
+            emails,
+            vec![Some("parent@ex".to_string()), Some("sib1@ex".to_string())]
+        );
     }
 
     #[tokio::test]
