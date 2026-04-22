@@ -10,16 +10,22 @@ file for the domain the isso server is running on.
 The `Installing Isso on Uberspace <https://lab.uberspace.de/guide_isso/>`_
 guide should also be helpful.
 
-pkg_ressources.DistributionNotFound
------------------------------------
+``cargo build`` fails with a missing system dependency
+------------------------------------------------------
 
-This is usually caused by messing up the system's Python with newer packages
-from PyPi (e.g. by executing `easy_install --upgrade pip` as root) and is not
-related to Isso at all.
+``isso-rs``'s build depends on an available C toolchain and OpenSSL
+headers. On Debian/Ubuntu::
 
-Install Isso in a virtual environment as described in
-:ref:`install-interludium`. Alternatively, you can use `pip install --user`
-to install Isso into the user's home.
+    $ sudo apt-get install build-essential pkg-config libssl-dev
+
+On Alpine (as used by the Docker image)::
+
+    $ apk add musl-dev perl make
+
+If ``cargo build`` still complains, make sure your Rust toolchain is
+current — the project targets stable Rust 1.70 or newer. Use
+`rustup <https://rustup.rs>`_ if your distribution's packaged toolchain
+is older.
 
 Why isn't markdown in my comments rendering as I expect?
 --------------------------------------------------------

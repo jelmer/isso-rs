@@ -1,81 +1,99 @@
-# Isso – a commenting server similar to Disqus
+# Isso – a commenting server similar to Disqus (Rust port)
 
-Isso – *Ich schrei sonst* – is a lightweight commenting server written in
-Python and JavaScript. It aims to be a drop-in replacement for
-[Disqus](http://disqus.com).
+Isso – *Ich schrei sonst* – is a lightweight commenting server. This branch
+is a Rust reimplementation of the upstream Python project; the server binary
+is `isso-rs`, the SQLite database format is unchanged, and the JSON HTTP API
+and JavaScript frontend remain compatible with the Python server.
+
+Upstream project (Python): [isso-comments/isso](https://github.com/isso-comments/isso).
 
 ## Features
 
-- **Comments written in Markdown**  
-  Users can edit or delete own comments (within 15 minutes by default).
-  Comments in moderation queue are not publicly visible before activation.
-- **SQLite backend**  
-  *Because comments are not Big Data.*
-- **Disqus & WordPress Import**  
-  You can migrate your Disqus/WordPress comments without any hassle.
-- **Configurable JS client**  
-  Embed a single JS file, 65kB (20kB gzipped) and you are done.
-
-See **[isso-comments.de](https://isso-comments.de/)** for a **live demo**, more
-details and [documentation](https://isso-comments.de/docs/).
-
-## Screenshot
-
-![Isso in Action](https://user-images.githubusercontent.com/10212877/167268553-3f30b448-25ff-4850-afef-df2f2e599c93.png)
+- **Comments written in Markdown**, with XSS-safe HTML rendering (ammonia-
+  based sanitiser).
+- **SQLite backend** with the same schema the Python server uses — this
+  branch can open a DB written by the Python server, and vice-versa.
+- **Disqus / WordPress / generic-JSON importers** (`isso-rs import`).
+- **Admin UI** served from the same binary.
+- **Configurable JS client** — the `static/js/` tree is unchanged from the
+  Python repo and is served by `isso-rs` itself or by any HTTP server you
+  prefer.
+- **Multi-site** via multiple `-c` flags; each site mounts at its
+  `[general] name` slug.
 
 ## Getting started
 
-### Requirements
-
-- Python 3.8+ (+ devel headers)
-- SQLite 3.3.8 or later
-- a working C compiler
-
-Install Isso from [PyPi](https://pypi.python.org/pypi/isso/):
+### From source
 
 ```console
-pip install isso
+$ cd isso-rs
+$ cargo build --release
 ```
 
-Then, follow the [Quickstart](https://isso-comments.de/docs/guides/quickstart/) guide.
+Produces `./target/release/isso-rs`. Requires a recent stable Rust toolchain
+(1.70+). The build links against system SQLite via `sqlx`.
 
-If you're stuck, follow the [Install guide](https://isso-comments.de/docs/reference/installation/),
-see [Troubleshooting](https://isso-comments.de/docs/guides/troubleshooting/) and browse
-the [the full documentation](https://isso-comments.de/docs/).
+### Configuration
 
-## Docker
+`isso-rs` reads the same `isso.cfg` format as the Python server — a
+documented reference file lives at `isso-rs/isso.cfg`.
 
-> [!NOTE]  
-> The Docker image tagging scheme for stable releases was changed from `:latest`
-> to `:release` as of March 2024
-> ([#970](https://github.com/isso-comments/isso/pull/970), [#1012](https://github.com/isso-comments/isso/issues/1012))
+```console
+$ isso-rs -c /path/to/isso.cfg
+```
 
-A [Docker image](https://github.com/isso-comments/isso/pkgs/container/isso) with
-the latest stable release is provided at `ghcr.io/isso-comments/isso:release`,
-while `isso:latest` is rebuilt on every push to the `master` branch. See
-[Using Docker](https://isso-comments.de/docs/reference/installation/#using-docker).
+For multi-site deployments, pass `-c` multiple times; each config's
+`[general] name` becomes the sub-path the site mounts under.
 
-The maintainers recommend pinning the image to a
-[release tag](https://github.com/isso-comments/isso/pkgs/container/isso), e.g.
-`isso:0.13.0`.
+### Importing from another comment system
+
+```console
+$ isso-rs -c isso.cfg import --type=auto export.xml
+```
+
+Supports Disqus XML, WordPress WXR, and the Isso-native generic JSON.
+
+### Docker
+
+The `Dockerfile` builds a two-stage image (Node for the JS bundles, Rust
+for the binary) and runs `isso-rs` directly as the entrypoint:
+
+```console
+$ docker build -t isso-rs .
+$ docker run -p 8080:8080 -v $PWD/config:/config -v $PWD/db:/db isso-rs
+```
+
+## Differences from the upstream Python server
+
+| Area | Status |
+|---|---|
+| SQLite schema + migrations | Identical — schema-equivalence is asserted by tests |
+| JSON HTTP API | Identical for the endpoints the JS client calls |
+| itsdangerous cookie format | Byte-compatible with Python for uncompressed payloads; interoperable for compressed payloads (valid DEFLATE, different bytes) |
+| PBKDF2 hash output | Byte-identical to Python's `hashlib.pbkdf2_hmac` |
+| Bloomfilter voter format | Byte-identical to Python's 256-byte, 11-probe SHA-256 scheme |
+| Markdown renderer | `pulldown-cmark` + `ammonia` sanitiser instead of `mistune` + `bleach` — the allowlist is the same, so the output is semantically equivalent for the default config |
+| gevent / uWSGI deployment | Replaced by axum + tokio. The `unix:///path` listener format still works |
+| WSGI entry points (`isso.run`, `isso.dispatch`) | Gone — the binary binds its own socket |
+| Admin templates | Rendered by `minijinja` from the same HTML templates; minijinja HTML-escapes `/` which Jinja2 doesn't, so URL attribute values differ in incidental characters |
+
+See `isso-rs/docs/porting-reference.md` for the full wire-compatibility
+specification the port was built against.
+
+## Tests
+
+```console
+$ cd isso-rs
+$ cargo test
+```
+
+125 tests at the time of the last commit: 93 unit, 22 HTTP integration,
+4 migrate-fixture end-to-end, 6 schema-equivalence.
 
 ## Contributing
 
-- Pull requests are very much welcome! These might be
-  [good first issues](https://github.com/isso-comments/isso/labels/good-first-issue)
-- See [Ways to Contribute](https://isso-comments.de/docs/contributing/)
-- [Translate](https://isso-comments.de/docs/contributing/#translations)
-
-### Development
-
-<!-- TODO also mention "Development & Testing" section once new docs uploaded -->
-Refer to the docs for
-[Installing from Source](https://isso-comments.de/docs/reference/installation/#install-from-source).
-
-### Help
-
-- Join `#isso` via IRC on [Libera.Chat](https://libera.chat/)
-- Ask a question on [GitHub Discussions](https://github.com/isso-comments/isso/discussions).
+Changes to the Python upstream welcome; changes specific to this port should
+stay in the `isso-rs/` tree. The `rust` branch is where this work lives.
 
 ## License
 

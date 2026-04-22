@@ -13,13 +13,16 @@ Server API
    - Like and dislike comments
    - **...and much more!**
 
-The Isso API uses ``HTTP`` and ``JSON`` as primary communication protocol. The
-API is extensively documented using an `apiDoc`_-compatible syntax in
-`isso/views/comments.py`_.
+The Isso API uses ``HTTP`` and ``JSON`` as primary communication protocol.
+The API is extensively documented using an `apiDoc`_-compatible syntax in
+`apidoc/_apidoc.js`_ — the original upstream annotations used to live
+inline as docstrings in ``isso/views/comments.py``; after the Rust port
+they were consolidated into a single JavaScript file so the apidoc
+pipeline has a single input tree.
 
 .. _Current API documentation: /docs/api/
 .. _apiDoc: https://apidocjs.com/
-.. _isso/views/comments.py: https://github.com/isso-comments/isso/blob/master/isso/views/comments.py
+.. _apidoc/_apidoc.js: https://github.com/isso-comments/isso/blob/rust/apidoc/_apidoc.js
 
 Sections covered in this document:
 
@@ -72,8 +75,11 @@ Writing API documentation
 
 Isso's API documentation is built using the `apiDoc`_ Javascript tool.
 
-Inside `isso/views/comments.py`_, the view functions that are public endpoints
-are annotated using ``@api`` syntax in code comments.
+Inside `apidoc/_apidoc.js`_, each public endpoint has a JavaScript block
+comment annotated using ``@api`` syntax. The source Rust handlers live
+in ``isso-rs/src/server/handlers.rs`` — when adding or renaming an
+endpoint, add the corresponding ``@api`` block to ``apidoc/_apidoc.js``
+by hand (the apidoc pipeline doesn't scrape Rust sources directly).
 
 .. note:: The `apiDoc`_ "Getting started" guide should also help you get up to
    speed in making the API documentation of Isso even better!
