@@ -77,7 +77,7 @@ Isso's API documentation is built using the `apiDoc`_ Javascript tool.
 
 Inside `apidoc/_apidoc.js`_, each public endpoint has a JavaScript block
 comment annotated using ``@api`` syntax. The source Rust handlers live
-in ``isso-rs/src/server/handlers.rs`` — when adding or renaming an
+in ``src/server/handlers.rs`` — when adding or renaming an
 endpoint, add the corresponding ``@api`` block to ``apidoc/_apidoc.js``
 by hand (the apidoc pipeline doesn't scrape Rust sources directly).
 

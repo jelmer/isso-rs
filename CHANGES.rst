@@ -41,9 +41,9 @@ compatible.
   ``[server] static-dir`` via ``tower-http`` when set.
 - Docker: three-stage musl build — Node for the JS bundles, Rust for the
   binary, Alpine runtime image.
-- Reorganised on-disk layout: ``isso/`` → ``isso-rs/``, Python-style
-  ``templates/`` → ``isso-rs/templates/``, JS/CSS/img/demo →
-  ``isso-rs/static/``.
+- Reorganised on-disk layout: the Python ``isso/`` package is gone;
+  Rust sources live at ``src/``, templates at ``templates/``, and the
+  JS/CSS/img/demo tree at ``static/``.
 
 Documented divergences from the Python implementation:
 

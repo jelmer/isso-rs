@@ -8,7 +8,7 @@ Original Python source: upstream `isso/` tree — see
 > **Status**: This document was written as a wire-compatibility spec
 > *before* the port. The `isso/*.py` paths cited below no longer exist in
 > this repository; they reference the upstream Python implementation at
-> the time of the port. The Rust implementation is under `isso-rs/src/`
+> the time of the port. The Rust implementation is under `src/`
 > and wire-compat is now enforced by tests rather than by this document
 > — see `tests/schema_compat.rs` and the `probes_match_python_for_known_keys`
 > / `default_pbkdf2_matches_python` tests in the `bloomfilter` and `hash`

@@ -1,10 +1,12 @@
-# Top-level Makefile for isso (Rust port of the Python commenting service).
+# Top-level Makefile for isso.
 #
-# Project layout after the Rust migration:
-#   isso-rs/                — Rust crate (server + admin UI + importers)
-#   isso-rs/static/js/      — JS frontend sources (webpack-built bundles
-#                              land here and are served by isso-rs at /js/)
-#   docs/                   — Sphinx docs
+# Project layout:
+#   src/                    — Rust crate sources
+#   templates/              — Jinja templates (admin UI)
+#   static/                 — JS/CSS/img/demo tree served at /js, /css, /img, /demo
+#   static/js/              — JS frontend sources; webpack-built bundles land
+#                              alongside and are served by isso-rs at /js/
+#   docs/                   — Sphinx docs (+ docs/porting-reference.md)
 #   apidoc/                 — apiDoc configuration
 #
 # Install dependencies:
@@ -12,12 +14,12 @@
 #   Docs:           pip install sphinx && apt install sassc
 #   Rust:           cargo (stable)
 
-ISSO_JS_SRC := $(shell find isso-rs/static/js/app -type f 2>/dev/null) \
-	       $(shell ls isso-rs/static/js/*.js 2>/dev/null | grep -vE "(min|dev)")
+ISSO_JS_SRC := $(shell find static/js/app -type f 2>/dev/null) \
+	       $(shell ls static/js/*.js 2>/dev/null | grep -vE "(min|dev)")
 
-ISSO_JS_DST := isso-rs/static/js/embed.min.js isso-rs/static/js/embed.dev.js \
-	       isso-rs/static/js/count.min.js isso-rs/static/js/count.dev.js \
-	       isso-rs/static/js/count.dev.js.map isso-rs/static/js/embed.dev.js.map
+ISSO_JS_DST := static/js/embed.min.js static/js/embed.dev.js \
+	       static/js/count.min.js static/js/count.dev.js \
+	       static/js/count.dev.js.map static/js/embed.dev.js.map
 
 DOCS_RST_SRC := $(shell find docs/ -type f -name '*.rst') \
 		$(wildcard docs/_theme/*) \
@@ -50,14 +52,14 @@ all: build js site
 
 # --------------------------------------------------------------------- Rust
 build:
-	cd isso-rs && cargo build --release
+	cargo build --release
 
 test-rust:
-	cd isso-rs && cargo test
+	cargo test
 
 lint-rust:
-	cd isso-rs && cargo clippy --all-targets -- -D warnings
-	cd isso-rs && cargo fmt --check
+	cargo clippy --all-targets -- -D warnings
+	cargo fmt --check
 
 # --------------------------------------------------------------------- JS
 init:
@@ -65,15 +67,15 @@ init:
 
 # Note: It doesn't make sense to split up configs by output file with
 # webpack, just run everything at once
-isso-rs/static/js/embed.min.js: $(ISSO_JS_SRC)
+static/js/embed.min.js: $(ISSO_JS_SRC)
 	npm run build-prod
 
-isso-rs/static/js/count.min.js: isso-rs/static/js/embed.min.js
+static/js/count.min.js: static/js/embed.min.js
 
-isso-rs/static/js/embed.dev.js: $(ISSO_JS_SRC)
+static/js/embed.dev.js: $(ISSO_JS_SRC)
 	npm run build-dev
 
-isso-rs/static/js/count.dev.js: isso-rs/static/js/embed.dev.js
+static/js/count.dev.js: static/js/embed.dev.js
 
 js: $(ISSO_JS_DST)
 
@@ -131,13 +133,13 @@ docker-testbed-push:
 docker-js-unit:
 	docker run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
-		--mount type=bind,source=$(PWD)/isso-rs/static/js/,target=/src/isso/js/,readonly \
+		--mount type=bind,source=$(PWD)/static/js/,target=/src/isso/js/,readonly \
 		$(TESTBED_IMAGE) npm run test-unit
 
 docker-js-integration:
 	docker run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
-		--mount type=bind,source=$(PWD)/isso-rs/static/js/,target=/src/isso/js/ \
+		--mount type=bind,source=$(PWD)/static/js/,target=/src/isso/js/ \
 		--env ISSO_ENDPOINT='http://isso-dev.local:8080' \
 		--network container:isso-server \
 		$(TESTBED_IMAGE) npm run test-integration
@@ -146,6 +148,6 @@ clean:
 	rm -f $(ISSO_JS_DST)
 	rm -rf $(DOCS_HTML_DST)
 	rm -rf $(APIDOC_DST)
-	cd isso-rs && cargo clean
+	cargo clean
 
 .PHONY: all apidoc apidoc-init build clean docker docker-js-integration docker-js-unit docker-push docker-release docker-release-push docker-run docker-testbed docker-testbed-push init js lint-rust site test-rust

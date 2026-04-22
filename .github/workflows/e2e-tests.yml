@@ -3,7 +3,9 @@ name: E2E tests with docker
 on:
   pull_request:
     paths:
-      - "isso-rs/**"
+      - "src/**"
+      - "static/**"
+      - "templates/**"
       - "package.json"
       - "docker/**"
       - "docker-compose.yml"
@@ -11,7 +13,9 @@ on:
       - ".github/workflows/e2e-tests.yml"
   push:
     paths:
-      - "isso-rs/**"
+      - "src/**"
+      - "static/**"
+      - "templates/**"
       - "package.json"
       - "docker/**"
       - "docker-compose.yml"
@@ -70,7 +74,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: updated-screenshots-and-hashes
-          path: isso-rs/static/js/tests/screenshots/reference/
+          path: static/js/tests/screenshots/reference/
 
       - name: Fail if "Compare screenshots" step failed
         if: ${{ steps.compare-screenshots.outcome == 'failure' }}

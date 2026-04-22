@@ -3,11 +3,19 @@ name: Rust
 on:
   push:
     paths:
-      - "isso-rs/**"
+      - "src/**"
+      - "tests/**"
+      - "templates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/rust.yml"
   pull_request:
     paths:
-      - "isso-rs/**"
+      - "src/**"
+      - "tests/**"
+      - "templates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/rust.yml"
 
 jobs:
@@ -17,9 +25,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
       fail-fast: false
-    defaults:
-      run:
-        working-directory: isso-rs
 
     steps:
       - name: Check out repository code
@@ -32,8 +37,6 @@ jobs:
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: isso-rs -> target
 
       - name: cargo build
         run: cargo build --all-targets

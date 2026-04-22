@@ -6,12 +6,12 @@
 *~
 
 /isso.egg-info/
-/isso-rs/static/js/components
-/isso-rs/static/js/embed.min.js
-/isso-rs/static/js/embed.dev.js
-/isso-rs/static/js/count.min.js
-/isso-rs/static/js/count.dev.js
-/isso-rs/static/js/**/*.map
+/static/js/components
+/static/js/embed.min.js
+/static/js/embed.dev.js
+/static/js/count.min.js
+/static/js/count.dev.js
+/static/js/**/*.map
 
 # apiDoc generated output
 apidoc/_output/
@@ -80,4 +80,4 @@ ENV/
 .idea/
 
 # Rust
-/isso-rs/target/
+/target/

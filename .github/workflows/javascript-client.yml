@@ -4,12 +4,12 @@ on:
   push:
     paths:
       - "package.json"
-      - "isso-rs/static/js/**"
+      - "static/js/**"
       - ".github/workflows/javascript-client.yml"
   pull_request:
     paths:
       - "package.json"
-      - "isso-rs/static/js/**"
+      - "static/js/**"
       - ".github/workflows/javascript-client.yml"
 
 jobs:
@@ -74,8 +74,8 @@ jobs:
       with:
         name: client-js-files
         path: |
-          isso-rs/static/js/embed.*.js
-          isso-rs/static/js/count.*.js
-          isso-rs/static/js/embed.dev.js.map
-          isso-rs/static/js/count.dev.js.map
+          static/js/embed.*.js
+          static/js/count.*.js
+          static/js/embed.dev.js.map
+          static/js/count.dev.js.map
         if-no-files-found: error

@@ -35,16 +35,16 @@ Build the JavaScript bundles:
 .. code-block:: console
 
     $ make init      # installs JS dependencies via npm
-    $ make js        # runs webpack, writes isso-rs/static/js/embed.*.js
+    $ make js        # runs webpack, writes static/js/embed.*.js
 
 Build the server:
 
 .. code-block:: console
 
-    $ make build     # cargo build --release → isso-rs/target/release/isso-rs
+    $ make build     # cargo build --release → target/release/isso-rs
 
-Copy or symlink the binary into your ``$PATH`` and the ``isso-rs/static/``,
-``isso-rs/templates/`` trees + a copy of ``isso-rs/isso.cfg`` to a persistent
+Copy or symlink the binary into your ``$PATH`` and the ``static/``,
+``templates/`` trees + a copy of ``isso.cfg`` to a persistent
 location. Static assets are only needed if you want ``isso-rs`` to serve them
 itself (set ``[server] static-dir = /path/to/static``); deployments behind a
 reverse proxy commonly let the proxy serve them.
@@ -62,7 +62,7 @@ Alpine runtime) that bundles the binary plus the ``static/`` and
 
     $ make docker        # tags isso:latest locally
     $ mkdir -p config/ db/
-    $ cp isso-rs/isso.cfg config/isso.cfg   # edit dbpath + host
+    $ cp isso.cfg config/isso.cfg   # edit dbpath + host
     $ docker run -d --rm --name isso -p 127.0.0.1:8080:8080 \
         -v $PWD/config:/config -v $PWD/db:/db \
         isso:latest
@@ -112,9 +112,9 @@ Upgrades
 --------
 
 From source: ``git pull && make build`` drops a new binary in
-``isso-rs/target/release/isso-rs``. Restart the service.
+``target/release/isso-rs``. Restart the service.
 
 From Docker: rebuild via ``make docker`` (or pull the image tag you use)
 and ``docker restart`` the container. The SQLite DB migrates forward
 automatically on open — see the schema-version notes in
-``isso-rs/docs/porting-reference.md``.
+``docs/porting-reference.md``.

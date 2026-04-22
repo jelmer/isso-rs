@@ -6,16 +6,29 @@ description = "A lightweight, self-hosted commenting service"
 license = "MIT"
 repository = "https://github.com/jelmer/isso-rs"
 homepage = "https://github.com/jelmer/isso-rs"
-readme = "../README.md"
+readme = "README.md"
 keywords = ["comments", "isso", "sqlite", "axum"]
 categories = ["web-programming::http-server"]
-# Exclude frontend test scaffolding from the published crate. The JS
-# bundles themselves are kept — the admin UI references them — but jest
-# configs, unit/integration test sources, and reference screenshots are
-# only useful from a git checkout.
-exclude = [
-    "static/js/tests/**",
-    "static/js/jest-*.config.js",
+# Published-crate contents. Everything outside this list (Makefile, docker,
+# docs, JS tests, etc.) is only useful from a git checkout and stays out
+# of the crates.io tarball.
+include = [
+    "/src/**",
+    "/templates/**",
+    "/static/css/**",
+    "/static/demo/**",
+    "/static/img/**",
+    # JS client — bundles (embed.min.js / count.min.js / .dev variants) and
+    # the underlying app/ sources. We deliberately skip static/js/tests/
+    # and the jest/webpack configs: those are only useful from a checkout.
+    "/static/js/*.js",
+    "/static/js/app/**/*.js",
+    "/static/js/app/**/*.svg",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/isso.cfg",
+    "/README.md",
+    "/LICENSE",
 ]
 
 [lib]

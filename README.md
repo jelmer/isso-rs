@@ -44,7 +44,6 @@ $ cargo install --git https://github.com/jelmer/isso-rs --bin isso-rs
 ### From a checkout
 
 ```console
-$ cd isso-rs
 $ cargo build --release
 ```
 
@@ -54,7 +53,7 @@ Produces `./target/release/isso-rs`. Requires a recent stable Rust toolchain
 ### Configuration
 
 `isso-rs` reads the same `isso.cfg` format as the Python server — a
-documented reference file lives at `isso-rs/isso.cfg`.
+documented reference file lives at `isso.cfg` in this repository.
 
 ```console
 $ isso-rs -c /path/to/isso.cfg
@@ -95,13 +94,12 @@ $ docker run -p 8080:8080 -v $PWD/config:/config -v $PWD/db:/db isso-rs
 | WSGI entry points (`isso.run`, `isso.dispatch`) | Gone — the binary binds its own socket |
 | Admin templates | Rendered by `minijinja` from the same HTML templates; minijinja HTML-escapes `/` which Jinja2 doesn't, so URL attribute values differ in incidental characters |
 
-See `isso-rs/docs/porting-reference.md` for the full wire-compatibility
+See `docs/porting-reference.md` for the full wire-compatibility
 specification the port was built against.
 
 ## Tests
 
 ```console
-$ cd isso-rs
 $ cargo test
 ```
 
@@ -112,8 +110,8 @@ $ cargo test
 
 Issues and pull requests welcome at
 [github.com/jelmer/isso-rs](https://github.com/jelmer/isso-rs). Frontend JS
-lives under `isso-rs/static/js/`; the Rust crate sources live under
-`isso-rs/src/`.
+lives under `static/js/`; the Rust crate sources live under
+`src/`.
 
 ## License
 
