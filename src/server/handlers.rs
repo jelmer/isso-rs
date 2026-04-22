@@ -1258,8 +1258,8 @@ pub struct AdminQuery {
 /// `GET /admin/` — HTML admin dashboard. Validates the admin-session cookie
 /// and renders admin.html with the comment listing. The template relies on
 /// `/js/admin.js` at the same host for client-side actions (edit, delete,
-/// validate). We don't bundle static assets in isso-rs — operators serve the
-/// isso JS from the Python package or their own static tree.
+/// validate). Those static assets are served by tower_http::ServeDir when
+/// `[server] static-dir` is set, or by a reverse proxy otherwise.
 pub async fn admin(
     State(state): State<AppState>,
     headers: HeaderMap,

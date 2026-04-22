@@ -13,7 +13,7 @@ guide should also be helpful.
 ``cargo build`` fails with a missing system dependency
 ------------------------------------------------------
 
-``isso-rs``'s build depends on an available C toolchain and OpenSSL
+``isso``'s build depends on an available C toolchain and OpenSSL
 headers. On Debian/Ubuntu::
 
     $ sudo apt-get install build-essential pkg-config libssl-dev

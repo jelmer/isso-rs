@@ -8,13 +8,13 @@ Rust port
 ^^^^^^^^^
 
 The server component has been rewritten in Rust. The deployment binary is
-``isso-rs``; the SQLite on-disk format is unchanged (existing databases
+``isso``; the SQLite on-disk format is unchanged (existing databases
 open in place) and the JSON HTTP API plus the JavaScript frontend remain
 compatible.
 
 - Replace the Python/WSGI runtime with ``axum`` on ``tokio``. The
   ``isso.run``, ``isso.dispatch``, gunicorn/uWSGI/gevent entry points are
-  gone; ``isso-rs`` binds its own TCP or Unix socket. (jelmer)
+  gone; ``isso`` binds its own TCP or Unix socket. (jelmer)
 - Port every data-access and HTTP endpoint 1:1 to Rust with
   wire-compatibility tests asserting schema + byte-level parity for the
   ``voters`` bloomfilter, PBKDF2 hash output, and itsdangerous cookie
@@ -23,7 +23,7 @@ compatible.
   fanout now emits a ``List-Unsubscribe`` header per recipient.
 - Port the admin UI (``minijinja`` rendering the original Jinja2
   templates) and Disqus/WordPress/generic-JSON importers
-  (``isso-rs import --type=auto <dump>``).
+  (``isso import --type=auto <dump>``).
 - Harden Markdown rendering: ``pulldown-cmark`` + ``ammonia`` replace
   ``mistune`` + ``bleach``; XSS invariants (script/onload/img stripping)
   are asserted in tests.

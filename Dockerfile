@@ -2,7 +2,7 @@
 #
 # Three-stage build:
 #  1. Node — build the JS bundles consumed by the admin UI / embed script.
-#  2. Rust — build the isso-rs binary.
+#  2. Rust — build the isso binary.
 #  3. Alpine — assemble the runtime image with the compiled binary + static
 #     assets + templates.
 
@@ -31,7 +31,7 @@ RUN make js
 
 
 # =======================================================
-# Stage 2: Build the isso-rs binary
+# Stage 2: Build the isso binary
 # =======================================================
 
 FROM docker.io/rust:1-alpine AS isso-builder
@@ -48,7 +48,7 @@ COPY ["isso.cfg", "./isso.cfg"]
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release \
- && cp target/release/isso-rs /usr/local/bin/isso-rs
+ && cp target/release/isso /usr/local/bin/isso
 
 
 # =======================================================
@@ -58,7 +58,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM docker.io/alpine:3 AS isso
 WORKDIR /isso/
 
-COPY --from=isso-builder /usr/local/bin/isso-rs /usr/local/bin/isso-rs
+COPY --from=isso-builder /usr/local/bin/isso /usr/local/bin/isso
 COPY --from=isso-builder /src/templates/ /isso/templates/
 COPY --from=isso-builder /src/isso.cfg /isso/isso.cfg
 # Merge the compiled JS bundles from stage 1 into the static tree.
@@ -73,5 +73,5 @@ RUN mkdir /db /config && chmod 1777 /db /config
 VOLUME /db /config
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/isso-rs"]
+ENTRYPOINT ["/usr/local/bin/isso"]
 CMD ["-c", "/config/isso.cfg"]

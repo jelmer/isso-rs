@@ -3,7 +3,7 @@
 Isso – *Ich schrei sonst* – is a lightweight commenting server. This
 repository is a Rust reimplementation of the original
 [Python project](https://github.com/isso-comments/isso); the server binary
-is `isso-rs`, the SQLite database format is unchanged, and the JSON HTTP
+is `isso`, the SQLite database format is unchanged, and the JSON HTTP
 API and JavaScript frontend remain compatible with the Python server.
 
 - Crate: [`isso` on crates.io](https://crates.io/crates/isso)
@@ -15,10 +15,10 @@ API and JavaScript frontend remain compatible with the Python server.
   based sanitiser).
 - **SQLite backend** with the same schema the Python server uses — this
   branch can open a DB written by the Python server, and vice-versa.
-- **Disqus / WordPress / generic-JSON importers** (`isso-rs import`).
+- **Disqus / WordPress / generic-JSON importers** (`isso import`).
 - **Admin UI** served from the same binary.
 - **Configurable JS client** — the `static/js/` tree is unchanged from the
-  Python repo and is served by `isso-rs` itself or by any HTTP server you
+  Python repo and is served by `isso` itself or by any HTTP server you
   prefer.
 - **Multi-site** via multiple `-c` flags; each site mounts at its
   `[general] name` slug.
@@ -31,14 +31,14 @@ API and JavaScript frontend remain compatible with the Python server.
 $ cargo install isso
 ```
 
-Drops the binary in `~/.cargo/bin/isso-rs`. The admin UI still needs the
+Drops the binary in `~/.cargo/bin/isso`. The admin UI still needs the
 `templates/` and (optionally) `static/` trees — clone the repo or copy
 those directories alongside wherever you deploy the binary.
 
 ### From git (latest development version)
 
 ```console
-$ cargo install --git https://github.com/jelmer/isso-rs --bin isso-rs
+$ cargo install --git https://github.com/jelmer/isso-rs
 ```
 
 ### From a checkout
@@ -47,16 +47,16 @@ $ cargo install --git https://github.com/jelmer/isso-rs --bin isso-rs
 $ cargo build --release
 ```
 
-Produces `./target/release/isso-rs`. Requires a recent stable Rust toolchain
+Produces `./target/release/isso`. Requires a recent stable Rust toolchain
 (1.70+). The build links against system SQLite via `sqlx`.
 
 ### Configuration
 
-`isso-rs` reads the same `isso.cfg` format as the Python server — a
+`isso` reads the same `isso.cfg` format as the Python server — a
 documented reference file lives at `isso.cfg` in this repository.
 
 ```console
-$ isso-rs -c /path/to/isso.cfg
+$ isso -c /path/to/isso.cfg
 ```
 
 For multi-site deployments, pass `-c` multiple times; each config's
@@ -65,7 +65,7 @@ For multi-site deployments, pass `-c` multiple times; each config's
 ### Importing from another comment system
 
 ```console
-$ isso-rs -c isso.cfg import --type=auto export.xml
+$ isso -c isso.cfg import --type=auto export.xml
 ```
 
 Supports Disqus XML, WordPress WXR, and the Isso-native generic JSON.
@@ -73,11 +73,11 @@ Supports Disqus XML, WordPress WXR, and the Isso-native generic JSON.
 ### Docker
 
 The `Dockerfile` builds a two-stage image (Node for the JS bundles, Rust
-for the binary) and runs `isso-rs` directly as the entrypoint:
+for the binary) and runs `isso` directly as the entrypoint:
 
 ```console
-$ docker build -t isso-rs .
-$ docker run -p 8080:8080 -v $PWD/config:/config -v $PWD/db:/db isso-rs
+$ docker build -t isso .
+$ docker run -p 8080:8080 -v $PWD/config:/config -v $PWD/db:/db isso
 ```
 
 ## Differences from the upstream Python server

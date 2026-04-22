@@ -1,7 +1,7 @@
 Installation
 ============
 
-Isso is distributed as the ``isso-rs`` binary (a Rust rewrite of the original
+Isso is distributed as the ``isso`` binary (a Rust rewrite of the original
 Python server, wire-compatible with the upstream SQLite schema and JSON API).
 There are three ways to run it: a pre-built Docker image, building from
 source, or a pre-built distribution package.
@@ -41,11 +41,11 @@ Build the server:
 
 .. code-block:: console
 
-    $ make build     # cargo build --release → target/release/isso-rs
+    $ make build     # cargo build --release → target/release/isso
 
 Copy or symlink the binary into your ``$PATH`` and the ``static/``,
 ``templates/`` trees + a copy of ``isso.cfg`` to a persistent
-location. Static assets are only needed if you want ``isso-rs`` to serve them
+location. Static assets are only needed if you want ``isso`` to serve them
 itself (set ``[server] static-dir = /path/to/static``); deployments behind a
 reverse proxy commonly let the proxy serve them.
 
@@ -67,7 +67,7 @@ Alpine runtime) that bundles the binary plus the ``static/`` and
         -v $PWD/config:/config -v $PWD/db:/db \
         isso:latest
 
-The container's ``ENTRYPOINT`` is ``/usr/local/bin/isso-rs -c /config/isso.cfg``,
+The container's ``ENTRYPOINT`` is ``/usr/local/bin/isso -c /config/isso.cfg``,
 so any extra flags you want to pass (``import``, ``-c /config/other.cfg``
 for multi-site, etc.) go after the image name.
 
@@ -84,7 +84,7 @@ be tagged and hosted separately.
 Running as a service
 --------------------
 
-``isso-rs`` is a plain binary that binds a TCP or Unix socket. Any
+``isso`` is a plain binary that binds a TCP or Unix socket. Any
 process supervisor works — systemd, OpenRC, runit, supervisord, etc.
 
 Minimal systemd unit:
@@ -98,7 +98,7 @@ Minimal systemd unit:
     [Service]
     Type=simple
     User=isso
-    ExecStart=/usr/local/bin/isso-rs -c /etc/isso.cfg
+    ExecStart=/usr/local/bin/isso -c /etc/isso.cfg
     Restart=on-failure
 
     [Install]
@@ -112,7 +112,7 @@ Upgrades
 --------
 
 From source: ``git pull && make build`` drops a new binary in
-``target/release/isso-rs``. Restart the service.
+``target/release/isso``. Restart the service.
 
 From Docker: rebuild via ``make docker`` (or pull the image tag you use)
 and ``docker restart`` the container. The SQLite DB migrates forward

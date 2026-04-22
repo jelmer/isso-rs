@@ -37,11 +37,11 @@ foo.example and other.bar:
     host = http://other.bar/
     dbpath = /var/lib/isso/other.bar.db
 
-Then you run ``isso-rs`` with each config passed via its own ``-c`` flag:
+Then you run ``isso`` with each config passed via its own ``-c`` flag:
 
 .. code-block:: sh
 
-    $ isso-rs -c /etc/isso.d/foo.example.cfg -c /etc/isso.d/other.bar.cfg
+    $ isso -c /etc/isso.d/foo.example.cfg -c /etc/isso.d/other.bar.cfg
 
 In your webserver configuration, proxy Isso as usual:
 
@@ -73,7 +73,7 @@ URLs on both sites as it will most likely cause CORS-related errors.
 
    **Multi-site support in Docker**
 
-   The container's ``ENTRYPOINT`` is ``/usr/local/bin/isso-rs -c /config/isso.cfg``,
+   The container's ``ENTRYPOINT`` is ``/usr/local/bin/isso -c /config/isso.cfg``,
    so extra ``-c`` flags go after the image name:
 
    .. code-block:: yaml

@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use isso_rs::{config::Config, db, migrate, server};
 
 #[derive(Debug, Parser)]
-#[command(name = "isso-rs", about = "Rust port of the Isso comment server")]
+#[command(name = "isso", about = "A lightweight, self-hosted commenting service")]
 struct Cli {
     /// Path to isso.cfg. Pass multiple times for multi-site deployments —
     /// each config needs `[general] name = <slug>` and its routes will be

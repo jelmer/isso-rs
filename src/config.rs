@@ -1,7 +1,7 @@
 //! Configuration loading, mirroring isso/isso.cfg and isso/config.py.
 //!
 //! We parse the same INI file the Python version reads so operators can run
-//! isso-rs against an unchanged deployment config.
+//! isso against an unchanged deployment config.
 
 use std::path::Path;
 use std::time::Duration;

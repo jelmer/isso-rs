@@ -10,7 +10,7 @@
 //! 3. For each thread, insert its comments in id order and keep a remap from
 //!    source id → inserted id so later parent references resolve correctly.
 //!
-//! Called from the CLI via `isso-rs import --type=<kind> <file>`.
+//! Called from the CLI via `isso import --type=<kind> <file>`.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;

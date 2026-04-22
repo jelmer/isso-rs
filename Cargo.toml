@@ -39,7 +39,7 @@ name = "isso_rs"
 path = "src/lib.rs"
 
 [[bin]]
-name = "isso-rs"
+name = "isso"
 path = "src/main.rs"
 
 [dependencies]

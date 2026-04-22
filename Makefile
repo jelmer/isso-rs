@@ -5,7 +5,7 @@
 #   templates/              — Jinja templates (admin UI)
 #   static/                 — JS/CSS/img/demo tree served at /js, /css, /img, /demo
 #   static/js/              — JS frontend sources; webpack-built bundles land
-#                              alongside and are served by isso-rs at /js/
+#                              alongside and are served by isso at /js/
 #   docs/                   — Sphinx docs (+ docs/porting-reference.md)
 #   apidoc/                 — apiDoc configuration
 #
