@@ -3,10 +3,9 @@
 //! We parse the same INI file the Python version reads so operators can run
 //! isso against an unchanged deployment config.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
-
-use ini::Ini;
 
 const DEFAULT_SALT: &str = "Eech7co8Ohloopo9Ol6baimi";
 
@@ -181,8 +180,8 @@ impl Default for Config {
 
 impl Config {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
-        let ini = Ini::load_from_file(path)?;
-        Self::from_ini(ini)
+        let raw = std::fs::read_to_string(path)?;
+        Self::parse(&raw)
     }
 
     pub fn parse(s: &str) -> anyhow::Result<Self> {
@@ -377,8 +376,8 @@ fn split_commas(v: &str) -> Vec<String> {
 
 /// Walk every value in the Ini file and substitute env vars in place.
 fn expand_ini_env_vars(mut ini: Ini) -> Ini {
-    for (_section, props) in ini.iter_mut() {
-        for (_key, value) in props.iter_mut() {
+    for section in ini.sections.values_mut() {
+        for value in section.values_mut() {
             let expanded = expand_env_vars(value);
             if expanded != *value {
                 *value = expanded;
@@ -386,6 +385,114 @@ fn expand_ini_env_vars(mut ini: Ini) -> Ini {
         }
     }
     ini
+}
+
+/// A tiny Python-`RawConfigParser`-compatible INI parser.
+///
+/// We rolled our own because the `rust-ini` and `configparser` crates both
+/// fail on Python's indent-based multi-line values (the form Isso uses for
+/// `host` and `trusted-proxies`). This covers exactly the dialect Isso's
+/// config uses: `[section]` headers, `key = value` (or `key : value`) pairs,
+/// `#`/`;` comments at line start only, and continuation lines that start
+/// with whitespace and append to the previous option's value joined by `\n`
+/// — the same shape CPython stores multi-line values in.
+#[derive(Debug, Default)]
+pub struct Ini {
+    /// section name → (option name → value). `BTreeMap` keeps the API
+    /// deterministic; insertion order doesn't matter for our consumers.
+    sections: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl Ini {
+    pub fn load_from_str(input: &str) -> anyhow::Result<Self> {
+        let mut ini = Ini::default();
+        let mut current_section: Option<String> = None;
+        // (section, key) of the last option we emitted; new indented lines
+        // append to this value.
+        let mut last_option: Option<(String, String)> = None;
+
+        for (lineno, line) in input.lines().enumerate() {
+            let lineno = lineno + 1;
+            let trimmed = line.trim_start();
+
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+                // Python's _read treats blank/comment lines as value terminators
+                // too, so any following indented line must start a new option.
+                last_option = None;
+                continue;
+            }
+
+            // Continuation: indented line that isn't a section header or
+            // comment. Append to the previous option's value.
+            let is_indented = line.starts_with(|c: char| c.is_whitespace());
+            if is_indented {
+                if let Some((sec, key)) = &last_option {
+                    let section = ini
+                        .sections
+                        .get_mut(sec)
+                        .expect("last_option's section must exist");
+                    let entry = section.get_mut(key).expect("last_option's key must exist");
+                    entry.push('\n');
+                    entry.push_str(trimmed);
+                    continue;
+                }
+                anyhow::bail!("config line {lineno}: continuation line without a preceding option");
+            }
+
+            // Section header: [name]
+            if let Some(rest) = trimmed.strip_prefix('[') {
+                let name = rest
+                    .strip_suffix(']')
+                    .or_else(|| {
+                        rest.split_once(']').map(|(n, trailing)| {
+                            // Trailing text after ] is tolerated by ConfigParser only
+                            // if it's whitespace; otherwise treat as malformed.
+                            if trailing.trim().is_empty() {
+                                n
+                            } else {
+                                ""
+                            }
+                        })
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("config line {lineno}: malformed section header")
+                    })?;
+                if name.is_empty() {
+                    anyhow::bail!("config line {lineno}: malformed section header");
+                }
+                let name = name.trim().to_string();
+                ini.sections.entry(name.clone()).or_default();
+                current_section = Some(name);
+                last_option = None;
+                continue;
+            }
+
+            // key = value  or  key : value
+            let Some(section_name) = current_section.as_deref() else {
+                anyhow::bail!("config line {lineno}: option outside any section");
+            };
+            let sep_idx = trimmed.find(['=', ':']).ok_or_else(|| {
+                anyhow::anyhow!("config line {lineno}: expected `key = value` or `key : value`")
+            })?;
+            let (raw_key, raw_val) = trimmed.split_at(sep_idx);
+            // Skip the separator char itself.
+            let raw_val = &raw_val[1..];
+            let key = raw_key.trim().to_ascii_lowercase();
+            if key.is_empty() {
+                anyhow::bail!("config line {lineno}: empty option name");
+            }
+            let value = raw_val.trim().to_string();
+            let section = ini.sections.entry(section_name.to_string()).or_default();
+            section.insert(key.clone(), value);
+            last_option = Some((section_name.to_string(), key));
+        }
+
+        Ok(ini)
+    }
+
+    pub fn section(&self, name: Option<&str>) -> Option<&BTreeMap<String, String>> {
+        self.sections.get(name?)
+    }
 }
 
 /// Reproduce Python's `os.path.expandvars`: substitute `$NAME` or `${NAME}`
@@ -538,5 +645,96 @@ mod tests {
         assert_eq!(cfg.general.dbpath, "/var/lib/isso.db");
         assert_eq!(cfg.general.max_age, Duration::from_secs(1800));
         assert_eq!(cfg.guard.ratelimit, 5);
+    }
+
+    // ------------------------------------------------------------------- Ini
+
+    #[test]
+    fn ini_parses_multiline_host_like_python_configparser() {
+        // The bug that motivated the custom parser: rust-ini and the
+        // `configparser` crate both collapse indented continuation lines
+        // into separate keys, so `host = \n    http://a/\n    http://b/`
+        // came out as `host=""` + garbage siblings, leaving
+        // `config.general.hosts` empty.
+        let cfg =
+            Config::parse("[general]\nhost =\n    http://a.example/\n    http://b.example/\n")
+                .unwrap();
+        assert_eq!(
+            cfg.general.hosts,
+            vec![
+                "http://a.example/".to_string(),
+                "http://b.example/".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ini_parses_multiline_trusted_proxies() {
+        let cfg =
+            Config::parse("[server]\ntrusted-proxies =\n    10.0.0.0/8\n    192.168.0.0/16\n")
+                .unwrap();
+        assert_eq!(
+            cfg.server.trusted_proxies,
+            vec!["10.0.0.0/8".to_string(), "192.168.0.0/16".to_string()]
+        );
+    }
+
+    #[test]
+    fn ini_ignores_comments_and_blank_lines() {
+        let cfg = Config::parse(
+            "\
+# leading comment
+; also a comment
+[general]
+# inside-section comment
+dbpath = /tmp/x.db
+
+; blank line above and comment here
+name = Example
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.general.dbpath, "/tmp/x.db");
+        assert_eq!(cfg.general.name, "Example");
+    }
+
+    #[test]
+    fn ini_accepts_colon_as_separator() {
+        // Python's ConfigParser accepts both `key = value` and `key : value`.
+        let cfg = Config::parse("[general]\ndbpath : /srv/comments.db\n").unwrap();
+        assert_eq!(cfg.general.dbpath, "/srv/comments.db");
+    }
+
+    #[test]
+    fn ini_option_keys_are_lowercased() {
+        // Python ConfigParser lower-cases keys by default (optionxform).
+        let ini = Ini::load_from_str("[general]\nDBPATH = /x.db\n").unwrap();
+        let sec = ini.section(Some("general")).unwrap();
+        assert_eq!(sec.get("dbpath"), Some(&"/x.db".to_string()));
+        assert!(sec.get("DBPATH").is_none());
+    }
+
+    #[test]
+    fn ini_continuation_without_preceding_option_is_error() {
+        let err = Config::parse("[general]\n    orphan\n").unwrap_err();
+        assert!(err.to_string().contains("continuation line"), "got: {err}");
+    }
+
+    #[test]
+    fn ini_option_outside_section_is_error() {
+        let err = Config::parse("dbpath = /x.db\n").unwrap_err();
+        assert!(
+            err.to_string().contains("outside any section"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn ini_blank_line_terminates_value_for_next_indented_line() {
+        // A blank line between an option and the next indented line means
+        // that line is NOT a continuation — it's an error (orphan
+        // continuation).
+        let err = Config::parse("[general]\ndbpath = /x.db\n\n    /y.db\n").unwrap_err();
+        assert!(err.to_string().contains("continuation line"), "got: {err}");
     }
 }
