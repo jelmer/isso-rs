@@ -107,7 +107,7 @@ async fn run_serve(config_paths: Vec<PathBuf>) -> anyhow::Result<()> {
         anyhow::bail!("unix:// listener is not supported on this platform");
     }
 
-    let addr: SocketAddr = parse_listen(&listen)?;
+    let addr: SocketAddr = resolve_listen(&listen).await?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("listening on {addr}");
     axum::serve(listener, app).await?;
@@ -223,7 +223,11 @@ async fn build_multisite(configs: Vec<Config>) -> anyhow::Result<Router> {
     Ok(router)
 }
 
-fn parse_listen(listen: &str) -> anyhow::Result<SocketAddr> {
+/// Resolve `[server] listen` (e.g. `http://localhost:8080` or `0.0.0.0:8080`)
+/// into a bindable `SocketAddr`. Handles hostnames too by going through
+/// `tokio::net::lookup_host`, which the Python server implicitly did via the
+/// OS resolver when binding.
+async fn resolve_listen(listen: &str) -> anyhow::Result<SocketAddr> {
     let url = if listen.starts_with("http://") || listen.starts_with("https://") {
         url::Url::parse(listen)?
     } else {
@@ -231,5 +235,21 @@ fn parse_listen(listen: &str) -> anyhow::Result<SocketAddr> {
     };
     let host = url.host_str().unwrap_or("127.0.0.1");
     let port = url.port().unwrap_or(8080);
-    Ok(format!("{host}:{port}").parse()?)
+    let hostport = format!("{host}:{port}");
+
+    // Prefer an IPv4 result if both are returned — matches the OS-default
+    // `bind(AF_INET)` behaviour and avoids surprising operators expecting
+    // IPv4 sockets on Linux.
+    let mut resolved: Vec<SocketAddr> = tokio::net::lookup_host(&hostport)
+        .await
+        .map_err(|e| anyhow::anyhow!("resolving {hostport}: {e}"))?
+        .collect();
+    resolved.sort_by_key(|a| match a {
+        SocketAddr::V4(_) => 0,
+        SocketAddr::V6(_) => 1,
+    });
+    resolved
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no addresses resolved for {hostport}"))
 }
