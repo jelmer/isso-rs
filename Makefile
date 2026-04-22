@@ -91,12 +91,15 @@ site: $(DOCS_HTML_DST)
 apidoc-init:
 	npm install apidoc
 
-# apiDoc previously scraped annotations from isso/views/comments.py; with the
-# Rust port those annotations now live in the handler module docstrings.
-# TODO: port the apidoc pipeline to read from isso-rs/src/server/handlers.rs
-# instead. For now apidoc targets are a no-op.
-apidoc:
-	@echo "apidoc generation is TODO after the Rust port; skipping."
+# apiDoc pulls annotations from apidoc/_apidoc.js. Before the Rust port the
+# majority lived in docstrings inside isso/views/comments.py and apidoc read
+# both sources; after the port we consolidated everything into _apidoc.js so
+# apidoc doesn't need to parse Rust.
+apidoc: $(APIDOC_SRC)
+	$(APIDOC) --config apidoc/apidoc.json \
+		--input apidoc/ \
+		--output $(APIDOC_DST) --private
+	cp -rT $(APIDOC_DST) $(DOCS_HTML_DST)/docs/api/
 
 # --------------------------------------------------------------------- Docker
 docker:
