@@ -294,11 +294,9 @@ fn parse_disqus(xml: &str) -> anyhow::Result<DisqusParsed> {
                         "title" if local_path.ends_with("thread/title") => {
                             thread.title = text.clone();
                         }
-                        "id" if local_path.ends_with("thread/id") => {
-                            // An empty <id/> flags a "duplicate empty" thread.
-                            if text.is_empty() {
-                                thread.has_empty_id = true;
-                            }
+                        // An empty <id/> flags a "duplicate empty" thread.
+                        "id" if local_path.ends_with("thread/id") && text.is_empty() => {
+                            thread.has_empty_id = true;
                         }
                         _ => {}
                     }
