@@ -1,6 +1,16 @@
 Changelog for Isso
 ==================
 
+0.1.2 (2026-04-23)
+------------------
+
+- Wrap the ``GET /config`` response under a ``config`` key so the shipped
+  ``embed.js`` (which reads ``rv.config``) can merge it. Without the
+  wrapper, every server-side toggle — ``gravatar``, ``reply-notifications``,
+  ``require-author``, ``require-email``, ``reply-to-self``, ``feed`` — was
+  silently ignored by the client, which kept its defaults (no gravatar,
+  identicons on, etc.). Matches Python isso's wire format. (jelmer)
+
 0.1.1 (2026-04-23)
 ------------------
 
