@@ -136,13 +136,13 @@ docker-testbed-push:
 docker-js-unit:
 	docker run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
-		--mount type=bind,source=$(PWD)/static/js/,target=/src/isso/js/,readonly \
+		--mount type=bind,source=$(PWD)/static/js/,target=/src/static/js/,readonly \
 		$(TESTBED_IMAGE) npm run test-unit
 
 docker-js-integration:
 	docker run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
-		--mount type=bind,source=$(PWD)/static/js/,target=/src/isso/js/ \
+		--mount type=bind,source=$(PWD)/static/js/,target=/src/static/js/ \
 		--env ISSO_ENDPOINT='http://isso-dev.local:8080' \
 		--network container:isso-server \
 		$(TESTBED_IMAGE) npm run test-integration
