@@ -167,13 +167,15 @@ async fn get_config_returns_public_knobs() {
     assert_eq!(
         j,
         json!({
-            "reply-to-self": false,
-            "require-email": false,
-            "require-author": false,
-            "reply-notifications": false,
-            "gravatar": false,
-            "avatar": false,
-            "feed": false,
+            "config": {
+                "reply-to-self": false,
+                "require-email": false,
+                "require-author": false,
+                "reply-notifications": false,
+                "gravatar": false,
+                "avatar": false,
+                "feed": false,
+            }
         })
     );
 }

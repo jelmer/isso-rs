@@ -66,8 +66,8 @@ impl PublicConfig {
     }
 }
 
-pub async fn config_endpoint(State(state): State<AppState>) -> Json<PublicConfig> {
-    Json(PublicConfig::from_state(&state))
+pub async fn config_endpoint(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "config": PublicConfig::from_state(&state) }))
 }
 
 /// `GET /info` — liveness/version endpoint. Python exposed it via
