@@ -8,7 +8,7 @@ on:
     - cron: '30 15 * * 1'
 
 env:
-  TESTBED_IMAGE: "ghcr.io/isso-comments/isso-js-testbed:latest"
+  TESTBED_IMAGE: "ghcr.io/jelmer/isso-js-testbed:latest"
 
 jobs:
   update-screenshots:
@@ -40,7 +40,7 @@ jobs:
       - name: Check for changes
         id: check-changes
         run: |
-          if git diff --quiet isso/js/tests/screenshots/reference/; then
+          if git diff --quiet static/js/tests/screenshots/reference/; then
             echo "changes=false" >> $GITHUB_OUTPUT
           else
             echo "changes=true" >> $GITHUB_OUTPUT

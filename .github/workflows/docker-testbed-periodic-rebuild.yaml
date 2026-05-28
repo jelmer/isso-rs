@@ -9,7 +9,7 @@ on:
 
 env:
   build_platforms: ${{ vars.BUILD_PLATFORMS || 'linux/amd64' }}
-  build_image: ${{ vars.BUILD_IMAGE || 'ghcr.io/isso-comments/isso-js-testbed' }}
+  build_image: ${{ vars.BUILD_IMAGE || 'ghcr.io/jelmer/isso-js-testbed' }}
 
 jobs:
   build:

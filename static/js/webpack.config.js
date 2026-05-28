@@ -19,7 +19,7 @@ module.exports = [
         target: ['web', 'es5'],
         /* https://webpack.js.org/configuration/resolve/#resolvemodules */
         resolve: {
-            /* Allow omission of `isso/js` path */
+            /* Allow omission of `static/js` path */
             modules: [
                 path.resolve(__dirname), // resolves to webpack.config.js file location
                 'node_modules',

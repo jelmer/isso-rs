@@ -46,9 +46,7 @@ SASS = sassc
 ISSO_IMAGE ?= isso-rs:latest
 ISSO_RELEASE_IMAGE ?= isso-rs:release
 ISSO_DOCKER_REGISTRY ?= ghcr.io/jelmer
-# The js-testbed image is shared with upstream — we consume (but don't
-# republish) their image for e2e tests.
-TESTBED_REGISTRY ?= ghcr.io/isso-comments
+TESTBED_REGISTRY ?= ghcr.io/jelmer
 TESTBED_IMAGE ?= isso-js-testbed:latest
 
 all: build js site
@@ -147,10 +145,30 @@ docker-js-integration:
 		--network container:isso-server \
 		$(TESTBED_IMAGE) npm run test-integration
 
+docker-generate-screenshots:
+	docker run \
+		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
+		--mount type=bind,source=$(PWD)/static/js/,target=/src/static/js/ \
+		--env ISSO_ENDPOINT='http://isso-dev.local:8080' \
+		--network container:isso-server \
+		$(TESTBED_IMAGE) npm run test-screenshots
+
+docker-compare-screenshots: docker-generate-screenshots
+	docker run \
+		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
+		--mount type=bind,source=$(PWD)/static/js/,target=/src/static/js/ \
+		$(TESTBED_IMAGE) bash static/js/tests/screenshots/compare-hashes.sh
+
+docker-update-screenshots: docker-generate-screenshots
+	docker run \
+		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
+		--mount type=bind,source=$(PWD)/static/js/,target=/src/static/js/ \
+		$(TESTBED_IMAGE) bash static/js/tests/screenshots/compare-hashes.sh -u
+
 clean:
 	rm -f $(ISSO_JS_DST)
 	rm -rf $(DOCS_HTML_DST)
 	rm -rf $(APIDOC_DST)
 	cargo clean
 
-.PHONY: all apidoc apidoc-init build clean docker docker-js-integration docker-js-unit docker-push docker-release docker-release-push docker-run docker-testbed docker-testbed-push init js lint-rust site test-rust
+.PHONY: all apidoc apidoc-init build clean docker docker-compare-screenshots docker-generate-screenshots docker-js-integration docker-js-unit docker-push docker-release docker-release-push docker-run docker-testbed docker-testbed-push docker-update-screenshots init js lint-rust site test-rust

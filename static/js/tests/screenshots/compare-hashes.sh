@@ -13,7 +13,7 @@
 # - imagemagick (for "identify" program)
 # - bash        (hopefully this script should run on any shell though)
 
-SCREENSHOTS_PATH=isso/js/tests/screenshots/reference
+SCREENSHOTS_PATH=static/js/tests/screenshots/reference
 update=false
 
 for i in "$@"; do

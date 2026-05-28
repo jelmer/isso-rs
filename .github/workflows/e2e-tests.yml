@@ -26,7 +26,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      TESTBED_IMAGE: "ghcr.io/isso-comments/isso-js-testbed:latest"
+      TESTBED_IMAGE: "ghcr.io/jelmer/isso-js-testbed:latest"
     steps:
       - uses: actions/checkout@v3
 
