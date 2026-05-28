@@ -145,7 +145,35 @@ pub fn router(state: AppState) -> Router {
             cors_middleware,
         ))
         .layer(middleware::from_fn(csrf_guard))
+        .layer(middleware::from_fn(redirect_static_dir_trailing_slash))
         .with_state(state)
+}
+
+/// Redirect a bare static-asset directory request (e.g. `GET /demo`) to its
+/// trailing-slash form (`/demo/`).
+///
+/// The static mounts are `nest_service`d at `/js`, `/css`, `/img`, `/demo`,
+/// and axum's `ServeDir` happily serves the directory index for both `/demo`
+/// and `/demo/` without redirecting. The JS frontend (and its puppeteer
+/// tests) rely on the upstream isso behaviour where `/demo` redirects to
+/// `/demo/`, so relative URLs on the page resolve against `/demo/`.
+async fn redirect_static_dir_trailing_slash(req: Request<Body>, next: Next) -> Response {
+    const STATIC_DIRS: [&str; 4] = ["/js", "/css", "/img", "/demo"];
+
+    if matches!(*req.method(), Method::GET | Method::HEAD) {
+        let path = req.uri().path();
+        if STATIC_DIRS.contains(&path) {
+            let mut target = String::from(path);
+            target.push('/');
+            if let Some(q) = req.uri().query() {
+                target.push('?');
+                target.push_str(q);
+            }
+            return axum::response::Redirect::permanent(&target).into_response();
+        }
+    }
+
+    next.run(req).await
 }
 
 /// CORS middleware mirroring isso/wsgi.py::CORSMiddleware.
@@ -572,5 +600,65 @@ mod cors_tests {
             resolve_allow_origin(None, &hosts),
             Some("https://example.tld".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod static_redirect_tests {
+    use super::*;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        Router::new()
+            .nest_service("/demo", tower_http::services::ServeDir::new("static/demo"))
+            .layer(middleware::from_fn(redirect_static_dir_trailing_slash))
+    }
+
+    async fn location_for(method: Method, uri: &str) -> (StatusCode, Option<String>) {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        (resp.status(), location)
+    }
+
+    #[tokio::test]
+    async fn bare_demo_redirects_to_trailing_slash() {
+        let (status, location) = location_for(Method::GET, "/demo").await;
+        assert_eq!(status, StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(location, Some("/demo/".to_string()));
+    }
+
+    #[tokio::test]
+    async fn bare_demo_redirect_preserves_query() {
+        let (status, location) = location_for(Method::GET, "/demo?foo=bar").await;
+        assert_eq!(status, StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(location, Some("/demo/?foo=bar".to_string()));
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_demo_is_served_not_redirected() {
+        let (status, location) = location_for(Method::GET, "/demo/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(location, None);
+    }
+
+    #[tokio::test]
+    async fn unrelated_path_is_not_redirected() {
+        let (status, location) = location_for(Method::GET, "/demo/foo").await;
+        assert_ne!(status, StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(location, None);
     }
 }
