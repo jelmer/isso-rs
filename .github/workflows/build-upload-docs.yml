@@ -1,4 +1,4 @@
-name: Build and upload docs to GitHub Pages
+name: Build docs
 
 on:
   push:
@@ -59,13 +59,3 @@ jobs:
 
       - name: Copy API docs to docs/ dir
         run: cp -r apidoc/_output/ docs/_build/html/docs/api
-
-      - name: Deploy (only on push to master)
-        uses: peaceiris/actions-gh-pages@v3
-        if: ${{ github.event_name == 'push' && github.event.ref == 'refs/heads/master' }}
-        with:
-          deploy_key: ${{ secrets.ACTIONS_DEPLOY_KEY }}
-          external_repository: isso-comments/isso-comments.github.io
-          publish_branch: gh-pages
-          publish_dir: ./docs/_build/html
-          cname: "isso-comments.de"
