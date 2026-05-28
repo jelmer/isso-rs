@@ -164,6 +164,8 @@ async fn get_config_returns_public_knobs() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp).await;
+    // With gravatar off (the default), upstream isso omits the `avatar` key
+    // entirely so the client keeps its own default (avatar: true).
     assert_eq!(
         j,
         json!({
@@ -173,6 +175,42 @@ async fn get_config_returns_public_knobs() {
                 "require-author": false,
                 "reply-notifications": false,
                 "gravatar": false,
+                "feed": false,
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn get_config_emits_avatar_false_only_when_gravatar_on() {
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.general.gravatar = true;
+        c
+    });
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp).await;
+    assert_eq!(
+        j,
+        json!({
+            "config": {
+                "reply-to-self": false,
+                "require-email": false,
+                "require-author": false,
+                "reply-notifications": false,
+                "gravatar": true,
                 "avatar": false,
                 "feed": false,
             }

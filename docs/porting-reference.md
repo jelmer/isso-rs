@@ -406,11 +406,15 @@ Output format: Hexadecimal string (12 chars for sha1 with dklen=6 → 6 bytes ×
       "require-author": false,
       "reply-notifications": false,
       "gravatar": false,
-      "avatar": false,
       "feed": false
     }
   }
   ```
+
+  The `avatar` key is only emitted (as `false`) when `gravatar` is enabled, to
+  suppress the client's default identicon in favour of gravatar images. With
+  gravatar off the key is absent and the client keeps its own default
+  (`avatar: true`). See isso/views/comments.py:207-210.
 
 **Sort mapping** (isso/views/comments.py:940-955):
 - `newest`: ORDER BY created DESC

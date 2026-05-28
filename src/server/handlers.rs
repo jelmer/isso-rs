@@ -48,19 +48,25 @@ pub struct PublicConfig {
     #[serde(rename = "reply-notifications")]
     reply_notifications: bool,
     gravatar: bool,
-    avatar: bool,
+    // Upstream isso only emits `avatar` (as false) when gravatar is enabled, to
+    // suppress the client's default identicon in favour of gravatar images. When
+    // gravatar is off the key is absent and the client keeps its own default
+    // (avatar: true). See isso/views/comments.py:207-210.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<bool>,
     feed: bool,
 }
 
 impl PublicConfig {
     pub fn from_state(state: &AppState) -> Self {
+        let gravatar = state.config.general.gravatar;
         Self {
             reply_to_self: state.config.guard.reply_to_self,
             require_email: state.config.guard.require_email,
             require_author: state.config.guard.require_author,
             reply_notifications: state.config.general.reply_notifications,
-            gravatar: state.config.general.gravatar,
-            avatar: false,
+            gravatar,
+            avatar: gravatar.then_some(false),
             feed: !state.config.rss.base.is_empty(),
         }
     }
