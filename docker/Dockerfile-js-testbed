@@ -12,13 +12,21 @@ WORKDIR /src/
 RUN apt-get update && apt-get install -y --no-install-recommends libnss3 libxss1 chromium
 
 # Installing puppeteer will take some time as it pulls in
-# a ~400Mb headless chrome file
-RUN npm install puppeteer
+# a ~400Mb headless chrome file.
+# Pin to puppeteer 22, the major jest-puppeteer 9 targets. Newer puppeteer
+# (23+) dropped BrowserContext.isIncognito(), which jest-puppeteer 9 still
+# calls during teardown ("global.context.isIncognito is not a function").
+RUN npm install puppeteer@^22
 
 # Skip downloading headless chromium again for future steps
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD true
 
-RUN npm install --no-save jest jest-puppeteer jest-environment-jsdom
+# Pin jest to the major the project targets (package.json: jest ^29) and
+# install the whole jest stack in one go, so the tree resolves to a single
+# consistent set of versions. An unpinned, multi-step install pulls in jest
+# 30 alongside jest-puppeteer 11, which mixes incompatible jest-runtime and
+# jest-mock builds and fails with "clearMocksOnScope is not a function".
+RUN npm install --no-save jest@^29 jest-puppeteer@^9 jest-environment-jsdom@^29
 
 # Need to set $CI so that jest-puppeteer applies sensible launch params for
 # running headless chromium. Otherwise, chromium will fail with a "missing

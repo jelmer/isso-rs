@@ -49,6 +49,9 @@ ISSO_DOCKER_REGISTRY ?= ghcr.io/jelmer
 TESTBED_REGISTRY ?= ghcr.io/jelmer
 TESTBED_IMAGE ?= isso-js-testbed:latest
 
+# Container runtime; override with `make DOCKER=podman ...` to use podman.
+DOCKER ?= docker
+
 all: build js site
 
 # --------------------------------------------------------------------- Rust
@@ -112,33 +115,33 @@ docker-release:
 	DOCKER_BUILDKIT=1 buildah build -t $(ISSO_IMAGE) .
 
 docker-run:
-	docker run -d --rm --name isso -p 127.0.0.1:8080:8080 \
+	$(DOCKER) run -d --rm --name isso -p 127.0.0.1:8080:8080 \
 		--mount type=bind,source=$(PWD)/contrib/isso-dev.cfg,target=/config/isso.cfg,readonly \
 		$(ISSO_IMAGE)
 
 docker-push:
-	docker tag $(ISSO_IMAGE) $(ISSO_DOCKER_REGISTRY)/$(ISSO_IMAGE)
-	docker push $(ISSO_DOCKER_REGISTRY)/$(ISSO_IMAGE)
+	$(DOCKER) tag $(ISSO_IMAGE) $(ISSO_DOCKER_REGISTRY)/$(ISSO_IMAGE)
+	$(DOCKER) push $(ISSO_DOCKER_REGISTRY)/$(ISSO_IMAGE)
 
 docker-release-push:
-	docker tag $(ISSO_RELEASE_IMAGE) $(ISSO_DOCKER_REGISTRY)/$(ISSO_RELEASE_IMAGE)
-	docker push $(ISSO_DOCKER_REGISTRY)/$(ISSO_RELEASE_IMAGE)
+	$(DOCKER) tag $(ISSO_RELEASE_IMAGE) $(ISSO_DOCKER_REGISTRY)/$(ISSO_RELEASE_IMAGE)
+	$(DOCKER) push $(ISSO_DOCKER_REGISTRY)/$(ISSO_RELEASE_IMAGE)
 
 docker-testbed:
-	DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile-js-testbed -t $(TESTBED_IMAGE) .
+	DOCKER_BUILDKIT=1 $(DOCKER) build -f docker/Dockerfile-js-testbed -t $(TESTBED_IMAGE) .
 
 docker-testbed-push:
-	docker tag $(TESTBED_IMAGE) $(TESTBED_REGISTRY)/$(TESTBED_IMAGE)
-	docker push $(TESTBED_REGISTRY)/$(TESTBED_IMAGE)
+	$(DOCKER) tag $(TESTBED_IMAGE) $(TESTBED_REGISTRY)/$(TESTBED_IMAGE)
+	$(DOCKER) push $(TESTBED_REGISTRY)/$(TESTBED_IMAGE)
 
 docker-js-unit:
-	docker run \
+	$(DOCKER) run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
 		--mount type=bind,source=$(PWD)/static/js/,target=/src/static/js/,readonly \
 		$(TESTBED_IMAGE) npm run test-unit
 
 docker-js-integration:
-	docker run \
+	$(DOCKER) run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
 		--mount type=bind,source=$(PWD)/static/js/,target=/src/static/js/ \
 		--env ISSO_ENDPOINT='http://isso-dev.local:8080' \
@@ -146,7 +149,7 @@ docker-js-integration:
 		$(TESTBED_IMAGE) npm run test-integration
 
 docker-generate-screenshots:
-	docker run \
+	$(DOCKER) run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
 		--mount type=bind,source=$(PWD)/static/js/,target=/src/static/js/ \
 		--env ISSO_ENDPOINT='http://isso-dev.local:8080' \
@@ -154,13 +157,13 @@ docker-generate-screenshots:
 		$(TESTBED_IMAGE) npm run test-screenshots
 
 docker-compare-screenshots: docker-generate-screenshots
-	docker run \
+	$(DOCKER) run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
 		--mount type=bind,source=$(PWD)/static/js/,target=/src/static/js/ \
 		$(TESTBED_IMAGE) bash static/js/tests/screenshots/compare-hashes.sh
 
 docker-update-screenshots: docker-generate-screenshots
-	docker run \
+	$(DOCKER) run \
 		--mount type=bind,source=$(PWD)/package.json,target=/src/package.json,readonly \
 		--mount type=bind,source=$(PWD)/static/js/,target=/src/static/js/ \
 		$(TESTBED_IMAGE) bash static/js/tests/screenshots/compare-hashes.sh -u
