@@ -10,11 +10,13 @@
 //!    - Tags: `a, p, hr, br, ol, ul, li, pre, code, blockquote, del, ins,
 //!      strong, em, h1..h6, sub, sup, table, thead, tbody, th, td`, plus
 //!      any `[markup] allowed-elements`.
-//!    - Attributes: `a: href`, `table: align`, `code: class` (iff matches
-//!      `^language-[a-zA-Z0-9]{1,20}$`), plus any `[markup] allowed-attributes`
-//!      on all tags.
-//!    - All `<a href="...">` links (except `mailto:`) get `rel="nofollow
-//!      noopener"` appended. Existing `rel` values are preserved.
+//!    - Attributes: `a: href` and `a: rel`, `table: align`, `code: class` (iff
+//!      matches `^language-[a-zA-Z0-9]{1,20}$`), plus any
+//!      `[markup] allowed-attributes` on all tags.
+//!    - All `<a href="...">` links except `mailto:` get `nofollow` and
+//!      `noopener` appended to their `rel` (case-insensitively deduplicated),
+//!      mirroring the `set_links` linkifier callback in isso/html/__init__.py.
+//!      Any author-supplied `rel` that survived sanitisation is preserved.
 //!
 //! The rendered string is wrapped in `<p>...</p>` if it isn't already — the
 //! JS frontend relies on this to detect "empty" renderings.
@@ -104,8 +106,8 @@ impl Renderer {
         let mut rendered = String::new();
         html::push_html(&mut rendered, parser);
 
-        // Step 2: sanitise + add rel=nofollow noopener on links.
-        let cleaned = self.sanitize(&rendered);
+        // Step 2: sanitise, then add rel=nofollow noopener on links.
+        let cleaned = apply_link_rel(&self.sanitize(&rendered));
 
         // Step 3: wrap in <p>…</p> if it isn't already (frontend invariant).
         wrap_paragraph(cleaned)
@@ -118,7 +120,11 @@ impl Renderer {
         }
 
         let mut tag_attrs: HashMap<&str, HashSet<&str>> = HashMap::new();
-        tag_attrs.insert("a", ["href"].into_iter().collect());
+        // `rel` is allowed through so a caller-supplied value survives to the
+        // set_links post-pass; bleach likewise keeps it only when the operator
+        // adds it to `allowed-attributes`, but passing it always is harmless
+        // since the renderer never emits `rel` on its own.
+        tag_attrs.insert("a", ["href", "rel"].into_iter().collect());
         tag_attrs.insert("table", ["align"].into_iter().collect());
         // `<code class="language-…">` is allowed, but the attribute_filter
         // below rejects any value that doesn't match language-<alnum>.
@@ -133,7 +139,11 @@ impl Renderer {
             .tags(tags)
             .tag_attributes(tag_attrs)
             .generic_attributes(generic_attrs)
-            .link_rel(Some("nofollow noopener"))
+            // `rel` is added by the set_links post-pass (see `apply_link_rel`),
+            // not ammonia's `link_rel`, because ammonia replaces the whole
+            // attribute and would also touch `mailto:` links — neither of which
+            // matches isso/html/__init__.py.
+            .link_rel(None)
             .url_relative(UrlRelative::PassThrough)
             // `code class="language-xxx"` is allowed only when the value
             // matches bleach's language-<alnum> pattern.
@@ -150,6 +160,135 @@ impl Renderer {
             });
         builder.clean(html).to_string()
     }
+}
+
+/// Append `nofollow` and `noopener` to the `rel` of every non-`mailto:` link,
+/// mirroring the `set_links` linkifier callback in isso/html/__init__.py:
+///
+/// - links without an `href` are left untouched,
+/// - `mailto:` links are skipped entirely (no `rel` added),
+/// - existing `rel` tokens are kept; `nofollow`/`noopener` are only appended
+///   when not already present (case-insensitive).
+///
+/// The input is trusted ammonia output, so `<a>` open tags are well-formed:
+/// lowercase tag name, attributes in `name="value"` form with double quotes.
+fn apply_link_rel(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let bytes = html.as_bytes();
+    let mut i = 0;
+    while i < html.len() {
+        // Look for the start of an `<a` open tag (followed by whitespace or
+        // `>`, so we don't match `<abbr>` etc.).
+        if bytes[i] == b'<'
+            && html[i + 1..].starts_with('a')
+            && matches!(bytes.get(i + 2), Some(b' ' | b'\t' | b'\n' | b'\r' | b'>'))
+        {
+            if let Some(end_rel) = html[i..].find('>') {
+                let tag = &html[i..i + end_rel + 1];
+                out.push_str(&rewrite_anchor_tag(tag));
+                i += end_rel + 1;
+                continue;
+            }
+        }
+        let ch = html[i..].chars().next().expect("valid char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Rewrite a single `<a ...>` open tag (including the angle brackets) per the
+/// set_links rules. Returns the tag unchanged when it has no `href` or the
+/// `href` is a `mailto:` link.
+fn rewrite_anchor_tag(tag: &str) -> String {
+    let inner = &tag[1..tag.len() - 1]; // strip < and >
+    let mut href: Option<String> = None;
+    let mut rel: Option<String> = None;
+    for (name, value) in attributes(inner) {
+        match name.to_ascii_lowercase().as_str() {
+            "href" => href = Some(value),
+            "rel" => rel = Some(value),
+            _ => {}
+        }
+    }
+
+    let href = match href {
+        Some(h) => h,
+        None => return tag.to_string(),
+    };
+    if href.starts_with("mailto:") {
+        return tag.to_string();
+    }
+
+    let mut rel_values: Vec<String> = rel
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    for token in ["nofollow", "noopener"] {
+        if !rel_values.iter().any(|v| v.eq_ignore_ascii_case(token)) {
+            rel_values.push(token.to_string());
+        }
+    }
+    let rel_attr = format!(" rel=\"{}\"", rel_values.join(" "));
+
+    // Rebuild the tag, dropping any existing rel (we re-emit it) and appending
+    // the computed rel just before the closing `>`.
+    let mut rebuilt = String::from("<a");
+    for (name, value) in attributes(inner) {
+        if name.eq_ignore_ascii_case("rel") {
+            continue;
+        }
+        rebuilt.push_str(&format!(" {name}=\"{value}\""));
+    }
+    rebuilt.push_str(&rel_attr);
+    rebuilt.push('>');
+    rebuilt
+}
+
+/// Parse `name="value"` attribute pairs out of an open-tag body (the text
+/// between `<a` and `>`). Only double-quoted values are produced, which is
+/// all ammonia ever emits.
+fn attributes(inner: &str) -> Vec<(String, String)> {
+    let mut attrs = Vec::new();
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < inner.len() {
+        // Skip the leading tag name token and any whitespace between attrs.
+        while i < inner.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let name_start = i;
+        while i < inner.len() && bytes[i] != b'=' && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let name = &inner[name_start..i];
+        while i < inner.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if name.is_empty() || i >= inner.len() || bytes[i] != b'=' {
+            // No value (e.g. the `a` tag-name token itself, or a bare attr);
+            // skip it and continue.
+            continue;
+        }
+        i += 1; // consume '='
+        while i < inner.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= inner.len() || bytes[i] != b'"' {
+            continue;
+        }
+        i += 1; // opening quote
+        let val_start = i;
+        while i < inner.len() && bytes[i] != b'"' {
+            i += 1;
+        }
+        let value = &inner[val_start..i];
+        i += 1; // closing quote
+        attrs.push((name.to_string(), value.to_string()));
+    }
+    attrs
 }
 
 fn wrap_paragraph(mut s: String) -> String {
@@ -239,28 +378,42 @@ mod tests {
 
     #[test]
     fn existing_rel_values_are_preserved() {
-        // Ammonia's link_rel prepends our rel values, leaving any caller-set
-        // ones in place. `me` is a valid rel value frontends may emit for
-        // self-links.
-        let r = Renderer::new();
+        // A caller-supplied rel (allowed via `allowed-attributes`) is kept and
+        // our tokens are appended, matching the set_links callback. `me` is a
+        // valid rel value frontends may emit for self-links.
+        let r = Renderer::with_allowlist(&[], &["rel".into()]);
         let got = r.render("<a href=\"x\" rel=\"me\">x</a>");
-        assert_eq!(got, "<p><a href=\"x\" rel=\"nofollow noopener\">x</a></p>");
-        // TODO: Python preserves user-supplied rel values by concatenating.
-        // Ammonia replaces rel entirely when link_rel is set; decide if
-        // that's a compat gap worth fixing.
+        assert_eq!(
+            got,
+            "<p><a href=\"x\" rel=\"me nofollow noopener\">x</a></p>"
+        );
     }
 
     #[test]
-    fn mailto_links_still_get_rel() {
-        // Python's bleach skips mailto: when adding rel. Ammonia does not
-        // make that distinction; documented here so the divergence is
-        // visible if anyone cares. rel=nofollow on mailto is harmless.
+    fn existing_rel_tokens_are_not_duplicated() {
+        // If the author already set nofollow, we must not add it twice
+        // (case-insensitive), per set_links.
+        let r = Renderer::with_allowlist(&[], &["rel".into()]);
+        let got = r.render("<a href=\"x\" rel=\"NoFollow\">x</a>");
+        assert_eq!(got, "<p><a href=\"x\" rel=\"NoFollow noopener\">x</a></p>");
+    }
+
+    #[test]
+    fn plain_link_gets_nofollow_noopener() {
         let r = Renderer::new();
-        let got = r.render("[mail](mailto:a@b.com)");
+        let got = r.render("<a href=\"https://example.com\">x</a>");
         assert_eq!(
             got,
-            "<p><a href=\"mailto:a@b.com\" rel=\"nofollow noopener\">mail</a></p>"
+            "<p><a href=\"https://example.com\" rel=\"nofollow noopener\">x</a></p>"
         );
+    }
+
+    #[test]
+    fn mailto_links_do_not_get_rel() {
+        // bleach's set_links skips mailto: links entirely; we match that.
+        let r = Renderer::new();
+        let got = r.render("[mail](mailto:a@b.com)");
+        assert_eq!(got, "<p><a href=\"mailto:a@b.com\">mail</a></p>");
     }
 
     #[test]
