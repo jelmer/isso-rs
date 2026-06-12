@@ -283,6 +283,13 @@ async fn post_new_creates_thread_and_returns_cookie() {
     assert_eq!(cookies.len(), 1, "expected one Set-Cookie header");
     let x_set: Vec<_> = resp.headers().get_all("x-set-cookie").iter().collect();
     assert_eq!(x_set.len(), 1, "expected one X-Set-Cookie header");
+    // The per-comment author cookie must stay readable by isso.js (it drives
+    // the edit/delete/reply UI), so it must NOT be HttpOnly.
+    assert!(
+        !cookies[0].to_str().unwrap().contains("HttpOnly"),
+        "comment author cookie must not be HttpOnly: {:?}",
+        cookies[0]
+    );
 
     let j = body_json(resp).await;
     assert_eq!(j["id"], json!(1));
@@ -500,6 +507,102 @@ async fn moderate_activate_flips_mode_to_accepted() {
         .await
         .unwrap();
     assert_eq!(mode, 1);
+}
+
+#[tokio::test]
+async fn moderate_get_does_not_break_out_of_script_with_evil_uri() {
+    // A thread URI containing `</script>` must not be able to close the
+    // inline <script> block in the moderation confirmation page.
+    let state = test_state().await;
+    let key = state.signer.sign(&1_i64).unwrap();
+    let app = router(state.clone());
+
+    let evil_uri = "/blog/</script><script>alert(document.cookie)</script>";
+    sqlx::query("INSERT INTO threads (id, uri, title) VALUES (1, ?, 'M')")
+        .bind(evil_uri)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, voters, notification) \
+         VALUES (1, NULL, 1.0, 2, '127.0.0.0', 'x', zeroblob(256), 0)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/id/1/delete/{key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    // Only the page's own closing tag may appear as a literal `</script>`.
+    // The payload's `</script>` must have been neutralised to `<\/script>`,
+    // so the injected `<script>` never gets a matching close and is inert.
+    assert_eq!(
+        body.matches("</script>").count(),
+        1,
+        "attacker URI broke out of the script context: {body}"
+    );
+    assert!(
+        body.contains("<\\/script><script>alert(document.cookie)<\\/script>"),
+        "expected the payload to be escaped in place: {body}"
+    );
+}
+
+#[tokio::test]
+async fn moderate_get_does_not_break_out_of_script_with_evil_action() {
+    // The capitalized action is interpolated into the inline <script> too;
+    // a path segment containing `</script>` must not break out either.
+    let state = test_state().await;
+    let key = state.signer.sign(&1_i64).unwrap();
+    let app = router(state.clone());
+
+    sqlx::query("INSERT INTO threads (id, uri, title) VALUES (1, '/m', 'M')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, voters, notification) \
+         VALUES (1, NULL, 1.0, 2, '127.0.0.0', 'x', zeroblob(256), 0)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    // Axum percent-decodes the path segment, so `%3C` etc. arrive as
+    // `</script>`. The `/` are encoded as `%2F` so they stay in one segment.
+    let evil_action = "%3C%2Fscript%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/id/1/{evil_action}/{key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    // No stray literal `</script>` from the action breaking out of the block,
+    // and the title got HTML-escaped rather than injecting a raw tag.
+    assert_eq!(
+        body.matches("</script>").count(),
+        1,
+        "attacker action broke out of the script context: {body}"
+    );
+    assert!(
+        !body.contains("<title></script>"),
+        "action injected a raw tag into the title: {body}"
+    );
 }
 
 #[tokio::test]
@@ -768,6 +871,12 @@ async fn admin_login_right_password_sets_session_cookie_and_redirects() {
         .headers()
         .get(header::SET_COOKIE)
         .expect("admin-session cookie present");
+    // The admin-session cookie is only read server-side, so it must be
+    // HttpOnly to keep any future XSS from exfiltrating it via document.cookie.
+    assert!(
+        set_cookie.to_str().unwrap().contains("; HttpOnly"),
+        "admin-session cookie must be HttpOnly: {set_cookie:?}"
+    );
     let value = set_cookie
         .to_str()
         .unwrap()
@@ -780,6 +889,45 @@ async fn admin_login_right_password_sets_session_cookie_and_redirects() {
         .to_string();
     let payload: serde_json::Value = signer.unsign(&value, Some(86400), 0).unwrap();
     assert_eq!(payload, serde_json::json!({"logged": true}));
+}
+
+#[tokio::test]
+async fn logout_expires_session_cookie_and_redirects_to_login() {
+    // The session cookie is HttpOnly, so logout has to clear it server-side.
+    let state = test_state().await;
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/logout/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/login/");
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("clearing Set-Cookie present")
+        .to_str()
+        .unwrap();
+    // Expire the cookie with the same attributes login sets it with, so the
+    // browser overwrites and drops it.
+    assert!(
+        set_cookie.starts_with("admin-session=;"),
+        "expected empty admin-session value: {set_cookie:?}"
+    );
+    assert!(
+        set_cookie.contains("Max-Age=0"),
+        "expected Max-Age=0 to expire the cookie: {set_cookie:?}"
+    );
+    assert!(
+        set_cookie.contains("; HttpOnly"),
+        "clearing cookie must match the HttpOnly attribute: {set_cookie:?}"
+    );
 }
 
 #[tokio::test]
