@@ -287,6 +287,16 @@ fn html_escape(s: &str, quote: bool) -> String {
     out
 }
 
+/// Make a JSON-encoded string safe to embed inside an inline `<script>` block.
+///
+/// `serde_json` does not escape `<`, `>` or `/`, so a value containing the
+/// literal `</script>` would close the script element regardless of JS
+/// string-literal context. Rewriting `</` to `<\/` keeps the JSON valid as a
+/// JavaScript string while preventing the breakout.
+fn js_string_escape(json: &str) -> String {
+    json.replace("</", "<\\/")
+}
+
 fn text_sha1_hex(text: &str) -> String {
     hex::encode(Sha1::digest(text.as_bytes()))
 }
@@ -295,14 +305,14 @@ fn cookie_headers(id: i64, value: &str, max_age: i64, state: &AppState) -> Vec<(
     vec![
         (
             header::SET_COOKIE.to_string(),
-            build_cookie(&id.to_string(), value, max_age, &state.config)
+            build_cookie(&id.to_string(), value, max_age, false, &state.config)
                 .to_str()
                 .expect("ASCII cookie")
                 .to_string(),
         ),
         (
             "X-Set-Cookie".to_string(),
-            build_cookie(&format!("isso-{id}"), value, max_age, &state.config)
+            build_cookie(&format!("isso-{id}"), value, max_age, false, &state.config)
                 .to_str()
                 .expect("ASCII cookie")
                 .to_string(),
@@ -891,15 +901,26 @@ pub async fn moderate_get(
     );
     // Build an HTML page that POSTs back to the same URL after user
     // confirmation, matching isso/views/comments.py::moderate's GET modal.
+    //
+    // Both `link` (derived from the thread URI) and `action` are
+    // attacker-controlled and untrusted. Values embedded in the inline
+    // <script> are JSON-encoded *and* run through js_string_escape, which
+    // turns `</` into `<\/` so a URI/action containing `</script>` cannot
+    // close the script block. The title gets ordinary HTML escaping.
     let action_cap = capitalize(&action);
-    let link_json = serde_json::to_string(&link).unwrap_or_else(|_| "\"\"".to_string());
+    let action_title = html_escape(&action_cap, false);
+    let action_js = js_string_escape(
+        &serde_json::to_string(&action_cap).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+    let link_json =
+        js_string_escape(&serde_json::to_string(&link).unwrap_or_else(|_| "\"\"".to_string()));
     let html = format!(
         "<!DOCTYPE html>\
          <html>\
-         <head><title>{action_cap}</title></head>\
+         <head><title>{action_title}</title></head>\
          <body>\
          <script>\
-           if (confirm('{action_cap}: Are you sure?')) {{\
+           if (confirm({action_js} + ': Are you sure?')) {{\
              var xhr = new XMLHttpRequest();\
              xhr.open('POST', window.location.href);\
              xhr.send(null);\
@@ -1203,8 +1224,14 @@ pub async fn login_post(
     };
     // Compute the redirect target: current URL with "/login/" → "/admin/".
     let location = redirect_to_admin(&headers);
-    let cookie = super::build_cookie("admin-session", &token, 60 * 60 * 24, &state.config);
-    let x_cookie = super::build_cookie("isso-admin-session", &token, 60 * 60 * 24, &state.config);
+    let cookie = super::build_cookie("admin-session", &token, 60 * 60 * 24, true, &state.config);
+    let x_cookie = super::build_cookie(
+        "isso-admin-session",
+        &token,
+        60 * 60 * 24,
+        true,
+        &state.config,
+    );
 
     let mut resp = (StatusCode::SEE_OTHER, "").into_response();
     resp.headers_mut().insert(
@@ -1212,6 +1239,26 @@ pub async fn login_post(
         location
             .parse()
             .unwrap_or_else(|_| axum::http::HeaderValue::from_static("/admin/")),
+    );
+    resp.headers_mut().append(header::SET_COOKIE, cookie);
+    resp.headers_mut().append("X-Set-Cookie", x_cookie);
+    resp
+}
+
+/// `GET /logout/` — clear the admin session and redirect to the login page.
+///
+/// The session cookie is HttpOnly, so JavaScript can't delete it via
+/// `document.cookie`; logout has to happen server-side. We expire both the
+/// `admin-session` cookie and its `isso-admin-session` mirror using the same
+/// attributes they were set with, so the browser overwrites and drops them.
+pub async fn logout(State(state): State<AppState>) -> Response {
+    let cookie = super::build_cookie("admin-session", "", 0, true, &state.config);
+    let x_cookie = super::build_cookie("isso-admin-session", "", 0, true, &state.config);
+
+    let mut resp = (StatusCode::SEE_OTHER, "").into_response();
+    resp.headers_mut().insert(
+        header::LOCATION,
+        axum::http::HeaderValue::from_static("/login/"),
     );
     resp.headers_mut().append(header::SET_COOKIE, cookie);
     resp.headers_mut().append("X-Set-Cookie", x_cookie);

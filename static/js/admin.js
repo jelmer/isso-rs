@@ -125,9 +125,9 @@ function send_edit(com_id, hash, isso_host_script) {
     stop_edit(com_id, true);
 }
 function log_out() {
-    // Delete cookie
-    document.cookie = "admin-session=; Max-Age=0; Path=/;";
-    window.location.reload();
+    // The admin-session cookie is HttpOnly, so JS can't clear it; the server
+    // expires it and redirects back to the login page.
+    window.location.href = "../logout/";
 }
 
 function toggleTooltip(tooltipContainer) {

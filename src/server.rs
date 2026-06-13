@@ -139,6 +139,7 @@ pub fn router(state: AppState) -> Router {
         .route("/id/:id/:action/:key", post(handlers::moderate_post))
         .route("/login/", get(handlers::login_get))
         .route("/login/", post(handlers::login_post))
+        .route("/logout/", get(handlers::logout))
         .route("/admin/", get(handlers::admin))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -439,7 +440,18 @@ pub fn external_url_prefix(headers: &HeaderMap, config: &Config) -> String {
 
 /// Shared cookie builder — mirrors Python's `create_cookie` closure:
 /// Secure when public-endpoint is HTTPS, SameSite=None in that case else Lax.
-pub fn build_cookie(name: &str, value: &str, max_age: i64, config: &Config) -> HeaderValue {
+///
+/// `http_only` must stay false for the per-comment author cookies, which
+/// isso.js reads via `document.cookie` to toggle the edit/delete/reply UI.
+/// It should be true for the admin-session cookie, which is only ever read
+/// server-side and has no reason to be exposed to JavaScript.
+pub fn build_cookie(
+    name: &str,
+    value: &str,
+    max_age: i64,
+    http_only: bool,
+    config: &Config,
+) -> HeaderValue {
     let public = if config.server.public_endpoint.is_empty() {
         &config.general.hosts[0]
     } else {
@@ -452,7 +464,10 @@ pub fn build_cookie(name: &str, value: &str, max_age: i64, config: &Config) -> H
         _ => "Lax",
     };
     let secure = if is_https { "; Secure" } else { "" };
-    let raw = format!("{name}={value}; Path=/; Max-Age={max_age}; SameSite={samesite}{secure}");
+    let http_only = if http_only { "; HttpOnly" } else { "" };
+    let raw = format!(
+        "{name}={value}; Path=/; Max-Age={max_age}; SameSite={samesite}{secure}{http_only}"
+    );
     HeaderValue::from_str(&raw).expect("cookie header value is ASCII")
 }
 
