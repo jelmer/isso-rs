@@ -442,6 +442,84 @@ async fn vote_updates_like_count_and_rejects_duplicate() {
 }
 
 #[tokio::test]
+async fn view_rejects_cookie_signed_for_another_comment() {
+    // A signed cookie only proves isso issued it, not that it was issued
+    // for the comment being fetched. Replaying comment 1's token under
+    // cookie name "2" must not expose the pending comment 2.
+    let state = test_state().await;
+    // SHA-1 of the comment text "mine", as POST /new would have signed it.
+    let token = state
+        .signer
+        .sign(&json!([1, "8034c43d15bb7ef42e2cc24255217acfc5f4b2f4"]))
+        .unwrap();
+    let app = router(state.clone());
+
+    sqlx::query("INSERT INTO threads (id, uri, title) VALUES (1, '/t', 'T')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, voters, notification) \
+         VALUES (1, NULL, 1.0, 1, '127.0.0.0', 'mine', zeroblob(256), 0), \
+                (1, NULL, 2.0, 2, '127.0.0.0', 'secret', zeroblob(256), 0)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/id/2")
+                .header(header::COOKIE, format!("2={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn view_accepts_cookie_signed_for_that_comment() {
+    let state = test_state().await;
+    // SHA-1 of the comment text "mine", as POST /new would have signed it.
+    let token = state
+        .signer
+        .sign(&json!([1, "8034c43d15bb7ef42e2cc24255217acfc5f4b2f4"]))
+        .unwrap();
+    let app = router(state.clone());
+
+    sqlx::query("INSERT INTO threads (id, uri, title) VALUES (1, '/t', 'T')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, voters, notification) \
+         VALUES (1, NULL, 1.0, 1, '127.0.0.0', 'mine', zeroblob(256), 0)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/id/1")
+                .header(header::COOKIE, format!("1={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp).await;
+    assert_eq!(j["id"], json!(1));
+}
+
+#[tokio::test]
 async fn preview_renders_markdown() {
     let app = router(test_state().await);
     let resp = app

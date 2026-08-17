@@ -654,7 +654,7 @@ pub async fn view(
 ) -> Result<Response, ApiError> {
     let comment = cmt::get(&state.db, id).await?.ok_or(ApiError::NotFound)?;
     let cookie = cookie_for(id, &headers).ok_or_else(|| ApiError::Forbidden("no cookie".into()))?;
-    let _claim: (i64, String) = state
+    let (cookie_id, _text_sha1): (i64, String) = state
         .signer
         .unsign(
             &cookie,
@@ -662,6 +662,12 @@ pub async fn view(
             now_unix() as u64,
         )
         .map_err(|e| ApiError::Forbidden(format!("invalid cookie: {e}")))?;
+    // A valid signature only proves we issued the token, not that we issued
+    // it for this comment. Without this the cookie from any comment of your
+    // own would read back anything, including unapproved comments.
+    if cookie_id != id {
+        return Err(ApiError::Forbidden("cookie id mismatch".into()));
+    }
     let render_html = q.plain.as_deref().unwrap_or("0") == "0";
     let body = serde_json::to_value(render_comment(comment, &state, render_html))
         .map_err(|e| ApiError::Internal(e.into()))?;
