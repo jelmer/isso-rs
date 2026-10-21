@@ -1094,3 +1094,73 @@ async fn post_count_returns_parallel_list() {
     let j = body_json(resp).await;
     assert_eq!(j, json!([1, 0]));
 }
+
+async fn insert_comment(state: &AppState, text: &str) {
+    sqlx::query("INSERT OR IGNORE INTO threads (id, uri, title) VALUES (1, '/t', 'T')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, voters, notification) \
+         VALUES (1, NULL, 1.0, 1, '127.0.0.0', ?, zeroblob(256), 0)",
+    )
+    .bind(text)
+    .execute(&state.db)
+    .await
+    .unwrap();
+}
+
+async fn send_with_cookie(state: &AppState, method: &str, id: i64, cookie: &str) -> StatusCode {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(format!("/id/{id}?plain=1"))
+        .header(header::COOKIE, format!("{id}={cookie}"));
+    let body = if method == "PUT" {
+        req = req.header(header::CONTENT_TYPE, "application/json");
+        Body::from(serde_json::to_vec(&json!({"text": "Hijacked"})).unwrap())
+    } else {
+        Body::empty()
+    };
+    router(state.clone())
+        .oneshot(req.body(body).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn edit_cookie_of_foreign_shape_is_rejected() {
+    // The signer is shared with the admin session, moderation and
+    // unsubscribe tokens, so payloads of another shape must be refused.
+    let state = test_state().await;
+    insert_comment(&state, "Lorem ipsum ...").await;
+    for payload in [
+        json!({"logged": true}),
+        json!(1),
+        json!(["unsubscribe", "bob@example.org"]),
+        json!("nope"),
+        json!([]),
+    ] {
+        let token = state.signer.sign(&payload).unwrap();
+        for method in ["GET", "PUT", "DELETE"] {
+            assert_eq!(
+                send_with_cookie(&state, method, 1, &token).await,
+                StatusCode::FORBIDDEN,
+                "{method} with payload {payload}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn edit_cookie_for_missing_comment_is_rejected() {
+    let state = test_state().await;
+    let token = state.signer.sign(&json!([99, "deadbeef"])).unwrap();
+    for method in ["GET", "PUT", "DELETE"] {
+        assert_eq!(
+            send_with_cookie(&state, method, 99, &token).await,
+            StatusCode::NOT_FOUND,
+            "{method}"
+        );
+    }
+}
