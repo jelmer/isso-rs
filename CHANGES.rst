@@ -4,6 +4,13 @@ Changelog for Isso
 0.1.3 (unreleased)
 ------------------
 
+- Render Markdown like isso's mistune renderer: raw HTML is escaped
+  rather than sanitised, ``hard_wrap`` turns newlines into line breaks,
+  ``~sub~`` and ``^sup^`` work (also mid-word), there's no smart
+  punctuation, ``javascript:`` and similar links become
+  ``#harmful-link``, and ``[markup.mistune] plugins`` decides which
+  extensions are on. Unsupported plugins and ``renderer = misaka`` are now
+  startup errors rather than silently ignored. (jelmer)
 - Add a ``[guard] website-field`` option to show or hide the website
   input in the comment form. (Port of isso#1111, pkvach)
 - Limit every submitted comment field to 65535 characters, not just

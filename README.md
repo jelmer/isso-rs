@@ -105,7 +105,7 @@ $ docker run -p 8080:8080 -v $PWD/config:/config -v $PWD/db:/db isso-rs
 | itsdangerous cookie format | Byte-compatible with Python for uncompressed payloads; interoperable for compressed payloads (valid DEFLATE, different bytes) |
 | PBKDF2 hash output | Byte-identical to Python's `hashlib.pbkdf2_hmac` |
 | Bloomfilter voter format | Byte-identical to Python's 256-byte, 11-probe SHA-256 scheme |
-| Markdown renderer | `pulldown-cmark` + `ammonia` sanitiser instead of `mistune` + `bleach` — the allowlist is the same, so the output is semantically equivalent for the default config |
+| Markdown renderer | `pulldown-cmark` + `ammonia` instead of `mistune` + `bleach`, configured to produce the same HTML for the default `strikethrough`, `subscript` and `superscript` plugins. The `table`, `footnotes`, `task_lists` and `def_list` plugins are approximated; other mistune plugins and the `misaka` renderer are rejected at startup |
 | gevent / uWSGI deployment | Replaced by axum + tokio. The `unix:///path` listener format still works |
 | WSGI entry points (`isso.run`, `isso.dispatch`) | Gone — the binary binds its own socket |
 | Admin templates | Rendered by `minijinja` from the same HTML templates; minijinja HTML-escapes `/` which Jinja2 doesn't, so URL attribute values differ in incidental characters |

@@ -44,10 +44,7 @@ impl AppState {
                 .fetch_one(&db)
                 .await?;
         let hasher = Hasher::from_config(&config.hash.algorithm, &config.hash.salt)?;
-        let renderer = Renderer::with_allowlist(
-            &config.markup.allowed_elements,
-            &config.markup.allowed_attributes,
-        );
+        let renderer = Renderer::from_config(&config.markup)?;
         let config = Arc::new(config);
         let signer = Arc::new(Signer::new(session_key.as_bytes()));
         let notifier = Arc::new(Notifier::new(Arc::clone(&config), Arc::clone(&signer)));
