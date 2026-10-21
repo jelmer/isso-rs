@@ -38,6 +38,10 @@ enum Command {
         /// isso's --empty-id CLI flag.
         #[arg(long)]
         empty_id: bool,
+        /// For Disqus: key threads by disqus_identifier (`<id>`) instead
+        /// of the page URL, falling back to the URL when it is empty.
+        #[arg(long)]
+        thread_id: bool,
     },
 }
 
@@ -74,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
             r#type,
             dump,
             empty_id,
-        } => run_import(cli.config, &r#type, &dump, empty_id).await,
+            thread_id,
+        } => run_import(cli.config, &r#type, &dump, empty_id, thread_id).await,
     }
 }
 
@@ -171,6 +176,7 @@ async fn run_import(
     kind: &str,
     dump: &std::path::Path,
     empty_id: bool,
+    use_thread_id: bool,
 ) -> anyhow::Result<()> {
     // A single config is required — the importer writes to exactly one DB.
     let config = match config_paths.len() {
@@ -196,7 +202,7 @@ async fn run_import(
         }
     }
 
-    let report = migrate::dispatch(kind, dump, &pool, empty_id).await?;
+    let report = migrate::dispatch(kind, dump, &pool, empty_id, use_thread_id).await?;
     eprintln!(
         "Imported {} threads and {} comments (orphans: {})",
         report.threads_inserted, report.comments_inserted, report.orphan_count

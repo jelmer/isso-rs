@@ -20,6 +20,7 @@ async fn disqus_fixture_imports_without_error() {
         std::path::Path::new("tests/fixtures/disqus.xml"),
         &pool,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -48,6 +49,7 @@ async fn disqus_fixture_with_empty_id_flag_imports_more() {
         std::path::Path::new("tests/fixtures/disqus.xml"),
         &pool1,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -58,6 +60,7 @@ async fn disqus_fixture_with_empty_id_flag_imports_more() {
         std::path::Path::new("tests/fixtures/disqus.xml"),
         &pool2,
         true,
+        false,
     )
     .await
     .unwrap();
@@ -74,6 +77,7 @@ async fn wordpress_fixture_imports_without_error() {
         "wordpress",
         std::path::Path::new("tests/fixtures/wordpress.xml"),
         &pool,
+        false,
         false,
     )
     .await
@@ -96,4 +100,66 @@ async fn autodetect_recognizes_all_fixtures() {
 
     let wp = std::fs::read_to_string("tests/fixtures/wordpress.xml").unwrap();
     assert!(matches!(migrate::autodetect(&wp), Some(Kind::WordPress)));
+}
+
+async fn thread_titles(pool: &SqlitePool) -> Vec<(String, Option<String>)> {
+    sqlx::query_as("SELECT uri, title FROM threads ORDER BY uri")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+async fn comment_count(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM comments")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn disqus_skips_threads_without_id_by_default() {
+    // Only dsq:id="2" (<id>some-id</id>) has an identifier; it is keyed by
+    // its URL path.
+    let pool = open_mem().await;
+    migrate::dispatch(
+        "disqus",
+        std::path::Path::new("tests/fixtures/disqus.xml"),
+        &pool,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(comment_count(&pool).await, 4);
+    assert_eq!(
+        thread_titles(&pool).await,
+        vec![("/".to_string(), Some("Hello, World!".to_string()))]
+    );
+}
+
+#[tokio::test]
+async fn disqus_thread_id_keys_threads_by_identifier() {
+    let pool = open_mem().await;
+    migrate::dispatch(
+        "disqus",
+        std::path::Path::new("tests/fixtures/disqus.xml"),
+        &pool,
+        true,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(comment_count(&pool).await, 5);
+    // dsq:id="2" is keyed by its <id>; dsq:id="7" has an empty <id /> and
+    // falls back to its URL path.
+    assert_eq!(
+        thread_titles(&pool).await,
+        vec![
+            (
+                "/blog/2013/02/12/redacted/index.html".to_string(),
+                Some(String::new())
+            ),
+            ("some-id".to_string(), Some("Hello, World!".to_string())),
+        ]
+    );
 }

@@ -18,6 +18,11 @@ Changelog for Isso
   (Port of isso#1113, pkvach)
 - Add a ``webhook`` notification backend that POSTs a signed JSON event
   for every saved comment. (Port of isso#1123, p1slave)
+- Add ``import --thread-id`` to key Disqus threads by their
+  ``disqus_identifier`` instead of the page URL path. Disqus threads with
+  a missing or self-closing ``<id />`` are now skipped unless
+  ``--empty-id`` is given, as they already were for ``<id></id>``.
+  (Port of isso#1127, pkvach)
 
 0.1.2 (2026-04-23)
 ------------------
