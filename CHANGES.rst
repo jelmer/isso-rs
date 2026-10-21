@@ -4,6 +4,8 @@ Changelog for Isso
 0.1.3 (unreleased)
 ------------------
 
+- Keep the admin login, logout and search under the reverse-proxy prefix
+  when isso is served from a sub-path. (jelmer)
 - Render Markdown like isso's mistune renderer: raw HTML is escaped
   rather than sanitised, ``hard_wrap`` turns newlines into line breaks,
   ``~sub~`` and ``^sup^`` work (also mid-word), there's no smart
