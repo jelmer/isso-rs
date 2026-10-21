@@ -12,6 +12,10 @@ Changelog for Isso
 - Send ``Cache-Control: no-store`` on ``GET /`` and ``GET /id/:id`` so
   browsers and proxies don't show stale comments. (Port of isso#1110,
   pkvach)
+- Update the comment count badges in the admin interface after a comment
+  is activated or deleted. ``POST /id/:id/(activate|delete)/:key`` now
+  returns the per-mode counts as JSON instead of a plain-text message.
+  (Port of isso#1113, pkvach)
 
 0.1.2 (2026-04-23)
 ------------------

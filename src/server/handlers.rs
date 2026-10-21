@@ -1021,7 +1021,7 @@ pub async fn moderate_post(
     match action.as_str() {
         "activate" => {
             if item.mode == 1 {
-                return Ok((StatusCode::OK, "Already activated").into_response());
+                return moderation_counts(&state).await;
             }
             cmt::activate(&state.db, signed_id).await?;
             // Refresh after the update and fire the activate notification.
@@ -1030,11 +1030,11 @@ pub async fn moderate_post(
                     .notifier
                     .comment_activated(&state.db, &thread, &activated);
             }
-            Ok((StatusCode::OK, "Comment has been activated").into_response())
+            moderation_counts(&state).await
         }
         "delete" => {
             cmt::delete(&state.db, signed_id).await?;
-            Ok((StatusCode::OK, "Comment has been deleted").into_response())
+            moderation_counts(&state).await
         }
         "edit" => {
             let body = body.ok_or_else(|| {
@@ -1067,6 +1067,17 @@ pub async fn moderate_post(
         }
         other => Err(ApiError::BadRequest(format!("unknown action: {other}"))),
     }
+}
+
+/// Number of comments per mode after a moderation action, so the admin UI
+/// can update its badges. Modes without comments are omitted.
+async fn moderation_counts(state: &AppState) -> Result<Response, ApiError> {
+    let counts: serde_json::Map<String, Value> = cmt::count_by_mode(&state.db)
+        .await?
+        .into_iter()
+        .map(|(mode, n)| (mode.to_string(), json!(n)))
+        .collect();
+    Ok((StatusCode::OK, Json(json!({ "counts": counts }))).into_response())
 }
 
 fn moderate_verify(state: &AppState, id: i64, key: &str) -> Result<i64, ApiError> {

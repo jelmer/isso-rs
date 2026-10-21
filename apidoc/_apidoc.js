@@ -373,6 +373,9 @@
 *     @apiParam {String} key
 *         The moderation key to authenticate the moderation.
 *
+*     @apiSuccess {Object} counts
+*         Number of comments per mode (`1`: accepted, `2`: in moderation queue, `4`: deleted, but referenced), after the moderation action was applied. A mode absent from `counts` has zero comments. Note that although mode is a `Number`, JSON object keys are always strings, so the mode keys in this object are strings (e.g. `"1"`, not `1`).
+*
 *     @apiExample {curl} delete comment with id 13:
 *         curl -X POST 'https://comments.example.com/id/13/delete/MTM.CjL6Fg.REIdVXa-whJS_x8ojQL4RrXnuF4'
 *
@@ -391,11 +394,11 @@
 *                     }
 *                 </script>
 *
-*     @apiSuccessExample Delete using POST:
-*         Comment has been deleted
+*     @apiSuccessExample {json} Delete using POST:
+*         {"counts": {"1": 3, "4": 1}}
 *
-*     @apiSuccessExample Activate using POST:
-*         Comment has been activated
+*     @apiSuccessExample {json} Activate using POST:
+*         {"counts": {"1": 4, "2": 1}}
 */
 
 /**

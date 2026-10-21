@@ -550,8 +550,6 @@ async fn moderate_activate_flips_mode_to_accepted() {
     // then hit /id/:id/activate/:key with a key signed for that id.
     let state = test_state().await;
     let key = state.signer.sign(&1_i64).unwrap();
-    let signer_key = key.clone();
-    let app = router(state.clone());
 
     // Moderation is only enabled when [moderation] enabled=true — without it
     // POST /new returns mode=1. For the test, insert a pending comment directly.
@@ -568,20 +566,10 @@ async fn moderate_activate_flips_mode_to_accepted() {
     .await
     .unwrap();
 
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/id/1/activate/{signer_key}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = moderate(&state, "activate", &key).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = String::from_utf8(body_bytes(resp).await).unwrap();
-    assert_eq!(body, "Comment has been activated");
+    // JSON object keys are strings; one comment is now in mode 1.
+    assert_eq!(body_json(resp).await, json!({"counts": {"1": 1}}));
 
     // Mode must have moved 2 -> 1.
     let mode: i64 = sqlx::query_scalar("SELECT mode FROM comments WHERE id = 1")
@@ -589,6 +577,37 @@ async fn moderate_activate_flips_mode_to_accepted() {
         .await
         .unwrap();
     assert_eq!(mode, 1);
+
+    // Activating again is idempotent.
+    let resp = moderate(&state, "activate", &key).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await, json!({"counts": {"1": 1}}));
+}
+
+async fn moderate(state: &AppState, action: &str, key: &str) -> axum::response::Response {
+    router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/id/1/{action}/{key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn moderate_delete_returns_remaining_counts() {
+    let state = test_state().await;
+    let key = state.signer.sign(&1_i64).unwrap();
+    insert_comment(&state, "doomed").await;
+
+    let resp = moderate(&state, "delete", &key).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // No references remain, so the comment is gone and every mode is empty.
+    assert_eq!(body_json(resp).await, json!({"counts": {}}));
 }
 
 #[tokio::test]
