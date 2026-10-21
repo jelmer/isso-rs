@@ -119,9 +119,6 @@ specification the port was built against.
 $ cargo test
 ```
 
-125 tests at the time of the last commit: 93 unit, 22 HTTP integration,
-4 migrate-fixture end-to-end, 6 schema-equivalence.
-
 ## Contributing
 
 Issues and pull requests welcome at
