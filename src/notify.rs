@@ -358,7 +358,10 @@ fn build_transport(smtp: &Smtp) -> anyhow::Result<AsyncSmtpTransport<Tokio1Execu
     };
     let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
         .port(port)
-        .tls(tls);
+        .tls(tls)
+        // TODO: lettre's async transport only applies this to connecting,
+        // not to reads and writes like smtplib does in isso.
+        .timeout(Some(Duration::from_secs(smtp.timeout)));
     if let Some(credentials) = credentials(smtp) {
         builder = builder.credentials(credentials);
     }
