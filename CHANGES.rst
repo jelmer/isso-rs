@@ -11,6 +11,8 @@ Changelog for Isso
   ``#harmful-link``, and ``[markup.mistune] plugins`` decides which
   extensions are on. Unsupported plugins and ``renderer = misaka`` are now
   startup errors rather than silently ignored. (jelmer)
+- Honour ``[moderation] approve-if-email-previously-approved``, which was
+  parsed but never applied. (jelmer)
 - Add a ``[guard] website-field`` option to show or hide the website
   input in the comment form. (Port of isso#1111, pkvach)
 - Limit every submitted comment field to 65535 characters, not just

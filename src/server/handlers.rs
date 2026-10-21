@@ -474,7 +474,7 @@ pub async fn new_comment(
         }
     };
 
-    let mode = if state.config.moderation.enabled {
+    let mut mode = if state.config.moderation.enabled {
         2
     } else {
         1
@@ -501,6 +501,12 @@ pub async fn new_comment(
                 .expect("non-db guard errors have a reason");
             return Ok((StatusCode::FORBIDDEN, Json(json!({ "reason": reason }))).into_response());
         }
+    }
+
+    if state.config.moderation.approve_if_email_previously_approved
+        && cmt::is_previously_approved_author(&state.db, email.as_deref()).await?
+    {
+        mode = 1;
     }
 
     let new_c = NewComment {
