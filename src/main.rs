@@ -49,8 +49,9 @@ enum Command {
 /// `[general] log-file`.
 fn init_logging(log_file: Option<&str>) -> anyhow::Result<()> {
     let builder = tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("isso_rs=info,tower_http=info")),
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            tracing_subscriber::EnvFilter::new("isso=info,isso_rs=info,tower_http=info")
+        }),
     );
     match log_file {
         Some(path) => {
