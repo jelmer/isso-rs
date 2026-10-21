@@ -16,6 +16,8 @@ Changelog for Isso
   is activated or deleted. ``POST /id/:id/(activate|delete)/:key`` now
   returns the per-mode counts as JSON instead of a plain-text message.
   (Port of isso#1113, pkvach)
+- Add a ``webhook`` notification backend that POSTs a signed JSON event
+  for every saved comment. (Port of isso#1123, p1slave)
 
 0.1.2 (2026-04-23)
 ------------------
