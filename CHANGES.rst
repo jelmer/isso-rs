@@ -1,7 +1,7 @@
 Changelog for Isso
 ==================
 
-0.1.3 (unreleased)
+0.1.3 (2026-10-22)
 ------------------
 
 - Keep the admin login, logout and search under the reverse-proxy prefix
