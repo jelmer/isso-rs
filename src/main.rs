@@ -45,16 +45,32 @@ enum Command {
     },
 }
 
+/// Log to stderr, or to `log_file` (appending) when set, like isso's
+/// `[general] log-file`.
+fn init_logging(log_file: Option<&str>) -> anyhow::Result<()> {
+    let builder = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("isso_rs=info,tower_http=info")),
+    );
+    match log_file {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|e| anyhow::anyhow!("opening log file {path}: {e}"))?;
+            builder
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        }
+        None => builder.init(),
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("isso_rs=info,tower_http=info")
-            }),
-        )
-        .init();
-
     let mut cli = Cli::parse();
 
     // Python Isso reads its config path from `$ISSO_SETTINGS` (split on `;`
@@ -79,7 +95,11 @@ async fn main() -> anyhow::Result<()> {
             dump,
             empty_id,
             thread_id,
-        } => run_import(cli.config, &r#type, &dump, empty_id, thread_id).await,
+        } => {
+            // Like isso, `log-file` only applies to the server.
+            init_logging(None)?;
+            run_import(cli.config, &r#type, &dump, empty_id, thread_id).await
+        }
     }
 }
 
@@ -92,6 +112,18 @@ async fn run_serve(config_paths: Vec<PathBuf>) -> anyhow::Result<()> {
             .map(|p| Config::from_file(p))
             .collect::<anyhow::Result<_>>()?
     };
+
+    let mut log_files: Vec<&str> = configs
+        .iter()
+        .map(|c| c.general.log_file.as_str())
+        .filter(|f| !f.is_empty())
+        .collect();
+    log_files.sort_unstable();
+    log_files.dedup();
+    if log_files.len() > 1 {
+        anyhow::bail!("sites configure different [general] log-file values: {log_files:?}");
+    }
+    init_logging(log_files.first().copied())?;
 
     // `[server] listen` comes from the first config, but `$ISSO_LISTEN`
     // (if set and non-empty) wins — the Docker image uses this to force
