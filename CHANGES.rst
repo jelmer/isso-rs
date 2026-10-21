@@ -7,6 +7,9 @@ Changelog for Isso
 - Limit every submitted comment field to 65535 characters, not just
   ``text``, and count the length in characters rather than bytes.
   (Port of isso#1117, NicolaiSoeborg)
+- Send ``Cache-Control: no-store`` on ``GET /`` and ``GET /id/:id`` so
+  browsers and proxies don't show stale comments. (Port of isso#1110,
+  pkvach)
 
 0.1.2 (2026-04-23)
 ------------------

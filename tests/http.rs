@@ -314,6 +314,7 @@ async fn get_empty_thread_returns_empty_replies() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
     let j = body_json(resp).await;
     assert_eq!(j["id"], Value::Null);
     assert_eq!(j["total_replies"], json!(0));
@@ -515,6 +516,7 @@ async fn view_accepts_cookie_signed_for_that_comment() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
     let j = body_json(resp).await;
     assert_eq!(j["id"], json!(1));
 }

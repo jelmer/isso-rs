@@ -317,6 +317,10 @@ fn is_url(text: &str) -> bool {
     re.is_match(text)
 }
 
+/// Sent on successful comment listings so browsers and proxies don't
+/// serve stale comments.
+const NO_CACHE_HEADERS: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
+
 fn now_unix() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -678,7 +682,7 @@ pub async fn fetch(
         "replies": replies,
         "config": PublicConfig::from_state(&state),
     });
-    Ok((StatusCode::OK, Json(body)).into_response())
+    Ok((StatusCode::OK, NO_CACHE_HEADERS, Json(body)).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -724,7 +728,7 @@ pub async fn view(
     let render_html = q.plain.as_deref().unwrap_or("0") == "0";
     let body = serde_json::to_value(render_comment(comment, &state, render_html))
         .map_err(|e| ApiError::Internal(e.into()))?;
-    Ok((StatusCode::OK, Json(body)).into_response())
+    Ok((StatusCode::OK, NO_CACHE_HEADERS, Json(body)).into_response())
 }
 
 #[derive(Debug, Deserialize)]
