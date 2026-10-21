@@ -4,6 +4,8 @@ Changelog for Isso
 0.1.3 (unreleased)
 ------------------
 
+- Add a ``[guard] website-field`` option to show or hide the website
+  input in the comment form. (Port of isso#1111, pkvach)
 - Limit every submitted comment field to 65535 characters, not just
   ``text``, and count the length in characters rather than bytes.
   (Port of isso#1117, NicolaiSoeborg)

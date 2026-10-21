@@ -84,6 +84,7 @@ pub struct Guard {
     pub reply_to_self: bool,
     pub require_author: bool,
     pub require_email: bool,
+    pub website_field: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +155,7 @@ impl Default for Config {
                 reply_to_self: false,
                 require_author: false,
                 require_email: false,
+                website_field: true,
             },
             markup: Markup {
                 renderer: "mistune".into(),
@@ -326,6 +328,9 @@ impl Config {
             }
             if let Some(v) = s.get("require-email") {
                 self.guard.require_email = parse_bool(v)?;
+            }
+            if let Some(v) = s.get("website-field") {
+                self.guard.website_field = parse_bool(v)?;
             }
         }
         if let Some(s) = ini.section(Some("markup")) {
@@ -601,6 +606,13 @@ mod tests {
         assert_eq!(c.hash.salt, "Eech7co8Ohloopo9Ol6baimi");
         assert_eq!(c.hash.algorithm, "pbkdf2");
         assert_eq!(c.rss.limit, 100);
+    }
+
+    #[test]
+    fn website_field_defaults_to_shown() {
+        assert!(Config::default().guard.website_field);
+        let cfg = Config::parse("[guard]\nwebsite-field = false\n").unwrap();
+        assert!(!cfg.guard.website_field);
     }
 
     #[test]

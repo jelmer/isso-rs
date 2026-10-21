@@ -45,6 +45,8 @@ pub struct PublicConfig {
     require_email: bool,
     #[serde(rename = "require-author")]
     require_author: bool,
+    #[serde(rename = "website-field")]
+    website_field: bool,
     #[serde(rename = "reply-notifications")]
     reply_notifications: bool,
     gravatar: bool,
@@ -64,6 +66,7 @@ impl PublicConfig {
             reply_to_self: state.config.guard.reply_to_self,
             require_email: state.config.guard.require_email,
             require_author: state.config.guard.require_author,
+            website_field: state.config.guard.website_field,
             reply_notifications: state.config.general.reply_notifications,
             gravatar,
             avatar: gravatar.then_some(false),
