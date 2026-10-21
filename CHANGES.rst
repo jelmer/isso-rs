@@ -1,6 +1,13 @@
 Changelog for Isso
 ==================
 
+0.1.3 (unreleased)
+------------------
+
+- Limit every submitted comment field to 65535 characters, not just
+  ``text``, and count the length in characters rather than bytes.
+  (Port of isso#1117, NicolaiSoeborg)
+
 0.1.2 (2026-04-23)
 ------------------
 

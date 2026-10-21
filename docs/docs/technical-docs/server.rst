@@ -13,6 +13,18 @@ Isso uses some of the following dependencies:
 - `mistune <https://mistune.lepture.com/>`_ – a fast yet powerful Python Markdown parser
 - `html5lib <https://github.com/html5lib/html5lib-python>`_ – HTML(5) parser and sanitizer
 
+Security
+--------
+
+- **HTML sanitization:** Isso sanitizes the HTML generated from comment
+  Markdown with ``ammonia``.
+
+- **Signed cookies:** Isso signs the cookies used for administrator
+  sessions and comment editing with an ``itsdangerous``-compatible signer.
+
+- **Field length limits:** Each submitted comment field is limited to 65535
+  characters. Some fields like ``email`` are limited to `254 characters <http://tools.ietf.org/html/rfc5321#section-4.5.3>`__.
+
 .. attention::
 
    This section of the Isso documentation is incomplete. Please help by expanding it.

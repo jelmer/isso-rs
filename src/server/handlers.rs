@@ -115,6 +115,45 @@ mod url_regex_tests {
     }
 }
 
+#[cfg(test)]
+mod verify_tests {
+    use super::verify_comment;
+
+    #[test]
+    fn rejects_overlong_fields() {
+        let max = "a".repeat(65535);
+        let over = "a".repeat(65536);
+        assert_eq!(verify_comment(Some(&max), None, None, None, None), Ok(()));
+        assert_eq!(
+            verify_comment(Some(&over), None, None, None, None),
+            Err("text is too long (maximum length: 65535)".to_string())
+        );
+        assert_eq!(
+            verify_comment(Some("abc"), Some(&over), None, None, None),
+            Err("author is too long (maximum length: 65535)".to_string())
+        );
+        assert_eq!(
+            verify_comment(Some("abc"), None, None, None, Some(&over)),
+            Err("title is too long (maximum length: 65535)".to_string())
+        );
+    }
+
+    #[test]
+    fn length_is_counted_in_characters() {
+        let max = "\u{e9}".repeat(65535);
+        assert_eq!(verify_comment(Some(&max), None, None, None, None), Ok(()));
+        assert_eq!(
+            verify_comment(Some("\u{e9}\u{e9}"), None, None, None, None),
+            Err("text is too short (minimum length: 3)".to_string())
+        );
+        let email = format!("{}@example.com", "\u{e9}".repeat(200));
+        assert_eq!(
+            verify_comment(Some("abc"), None, None, Some(&email), None),
+            Ok(())
+        );
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct NewQuery {
     uri: String,
@@ -210,28 +249,41 @@ fn verify_comment(
     author: Option<&str>,
     website: Option<&str>,
     email: Option<&str>,
+    title: Option<&str>,
 ) -> Result<(), String> {
+    const MAX_FIELD_LENGTH: usize = 65535;
     let text = text.ok_or_else(|| "text is missing".to_string())?;
-    if text.trim_end().len() < 3 {
+    let fields = [
+        ("text", Some(text)),
+        ("author", author),
+        ("website", website),
+        ("email", email),
+        ("title", title),
+    ];
+    // Python measures all lengths in code points, not bytes.
+    for (key, value) in fields {
+        if value.is_some_and(|v| v.chars().count() > MAX_FIELD_LENGTH) {
+            return Err(format!(
+                "{key} is too long (maximum length: {MAX_FIELD_LENGTH})"
+            ));
+        }
+    }
+    if text.trim_end().chars().count() < 3 {
         return Err("text is too short (minimum length: 3)".into());
     }
-    if text.len() > 65535 {
-        return Err("text is too long (maximum length: 65535)".into());
-    }
     if let Some(email) = email {
-        if email.len() > 254 {
+        if email.chars().count() > 254 {
             return Err("http://tools.ietf.org/html/rfc5321#section-4.5.3".into());
         }
     }
     if let Some(website) = website {
-        if website.len() > 254 {
+        if website.chars().count() > 254 {
             return Err("arbitrary length limit".into());
         }
         if !website.is_empty() && !is_url(website) {
             return Err("Website not Django-conform".into());
         }
     }
-    let _ = author;
     Ok(())
 }
 
@@ -352,6 +404,7 @@ pub async fn new_comment(
         body.author.as_deref(),
         body.website.as_deref(),
         body.email.as_deref(),
+        body.title.as_deref(),
     )
     .map_err(ApiError::BadRequest)?;
 
@@ -709,6 +762,7 @@ pub async fn edit(
         body.author.as_deref(),
         body.website.as_deref(),
         None,
+        None,
     )
     .map_err(ApiError::BadRequest)?;
 
@@ -983,6 +1037,7 @@ pub async fn moderate_post(
                 body.0.text.as_deref(),
                 body.0.author.as_deref(),
                 body.0.website.as_deref(),
+                None,
                 None,
             )
             .map_err(ApiError::BadRequest)?;
