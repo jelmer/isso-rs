@@ -1230,3 +1230,57 @@ async fn guard_rejection_reports_missing_email() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert_eq!(body_json(resp).await, json!({"reason": "require-email"}));
 }
+
+#[tokio::test]
+async fn previously_approved_email_skips_moderation() {
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.moderation.enabled = true;
+        c.moderation.approve_if_email_previously_approved = true;
+        c
+    });
+    sqlx::query("INSERT INTO threads (id, uri, title) VALUES (1, '/guarded', 'Guarded')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, email, voters, notification) \
+         VALUES (1, NULL, strftime('%s', 'now'), 1, '10.0.0.0', 'old', 'known@example.com', zeroblob(256), 0)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let resp = post_new(
+        &state,
+        json!({"text": "Lorem ipsum", "email": "known@example.com"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(body_json(resp).await["mode"], json!(1));
+
+    let resp = post_new(
+        &state,
+        json!({"text": "Lorem ipsum", "email": "new@example.com"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert_eq!(body_json(resp).await["mode"], json!(2));
+}
+
+#[tokio::test]
+async fn email_is_html_escaped_before_storing() {
+    let state = test_state().await;
+    let resp = post_new(
+        &state,
+        json!({"text": "Lorem ipsum", "title": "T", "email": "a&b<c>@example.com"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let email: String = sqlx::query_scalar("SELECT email FROM comments WHERE id = 1")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(email, "a&amp;b&lt;c&gt;@example.com");
+}

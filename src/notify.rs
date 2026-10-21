@@ -358,14 +358,20 @@ fn build_transport(smtp: &Smtp) -> anyhow::Result<AsyncSmtpTransport<Tokio1Execu
     };
     let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
         .port(port)
-        .tls(tls);
-    if !smtp.username.is_empty() || !smtp.password.is_empty() {
-        builder = builder.credentials(Credentials::new(
-            smtp.username.clone(),
-            smtp.password.clone(),
-        ));
+        .tls(tls)
+        // TODO: lettre's async transport only applies this to connecting,
+        // not to reads and writes like smtplib does in isso.
+        .timeout(Some(Duration::from_secs(smtp.timeout)));
+    if let Some(credentials) = credentials(smtp) {
+        builder = builder.credentials(credentials);
     }
     Ok(builder.build())
+}
+
+/// Like isso, only log in when both a username and a password are set.
+fn credentials(smtp: &Smtp) -> Option<Credentials> {
+    (!smtp.username.is_empty() && !smtp.password.is_empty())
+        .then(|| Credentials::new(smtp.username.clone(), smtp.password.clone()))
 }
 
 #[derive(serde::Serialize)]
@@ -634,6 +640,19 @@ mod tests {
                 build_transport(&smtp).err()
             );
         }
+    }
+
+    #[test]
+    fn credentials_need_both_username_and_password() {
+        let smtp = |username: &str, password: &str| Smtp {
+            username: username.into(),
+            password: password.into(),
+            ..Default::default()
+        };
+        assert!(credentials(&smtp("", "")).is_none());
+        assert!(credentials(&smtp("user", "")).is_none());
+        assert!(credentials(&smtp("", "secret")).is_none());
+        assert!(credentials(&smtp("user", "secret")).is_some());
     }
 
     #[test]

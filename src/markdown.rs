@@ -2,10 +2,10 @@
 //!
 //! Mirrors the two-stage pipeline from isso/html/__init__.py:
 //!
-//! 1. **Render Markdown** with pulldown-cmark (raw HTML is not escaped at this
-//!    step — ammonia handles it below, and escaping twice corrupts the output).
-//!    We enable strikethrough and tables because the Python defaults enable
-//!    `strikethrough, subscript, superscript` mistune plugins.
+//! 1. **Render Markdown** with pulldown-cmark, configured like isso's mistune
+//!    renderer: raw HTML in the input is always escaped, `[markup.mistune]
+//!    plugins` select the syntax extensions, and the `hard_wrap` parameter
+//!    turns single newlines into `<br>`.
 //! 2. **Sanitize** with ammonia using the Python allowlist:
 //!    - Tags: `a, p, hr, br, ol, ul, li, pre, code, blockquote, del, ins,
 //!      strong, em, h1..h6, sub, sup, table, thead, tbody, th, td`, plus
@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ammonia::{Builder, UrlRelative};
-use pulldown_cmark::{html, Options, Parser};
+use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 
 /// Tags the Python reference implementation allows unconditionally.
@@ -59,6 +59,11 @@ const BASE_ALLOWED_TAGS: &[&str] = &[
 ];
 
 pub struct Renderer {
+    options: Options,
+    hard_wrap: bool,
+    /// mistune's subscript/superscript patterns, which unlike pulldown-cmark
+    /// also match mid-word (`H~2~O`, `x^2^`).
+    script_regex: Option<Regex>,
     extra_tags: HashSet<String>,
     extra_attrs: HashSet<String>,
     code_class_regex: Regex,
@@ -70,47 +75,211 @@ impl Default for Renderer {
     }
 }
 
+/// Map a mistune plugin name onto the pulldown-cmark option providing the
+/// same syntax.
+fn plugin_option(name: &str) -> Option<Options> {
+    match name {
+        // pulldown-cmark reads a single `~x~` as strikethrough unless its
+        // subscript extension is on, which mistune doesn't do. Its subscript
+        // markers are turned back into text in `markdown_events`, since
+        // sub/superscript are done with mistune's own patterns there.
+        "strikethrough" => Some(Options::ENABLE_STRIKETHROUGH | Options::ENABLE_SUBSCRIPT),
+        "subscript" | "superscript" => Some(Options::empty()),
+        "table" => Some(Options::ENABLE_TABLES),
+        "footnotes" => Some(Options::ENABLE_FOOTNOTES),
+        "task_lists" => Some(Options::ENABLE_TASKLISTS),
+        "def_list" => Some(Options::ENABLE_DEFINITION_LIST),
+        _ => None,
+    }
+}
+
 impl Renderer {
+    /// Renderer with isso's default `[markup]` and `[markup.mistune]`
+    /// settings.
     pub fn new() -> Self {
-        Self::with_allowlist(&[], &[])
+        Self::from_config(&crate::config::Config::default().markup)
+            .expect("default markup config is supported")
     }
 
-    /// Build a renderer that honours `[markup] allowed-elements` and
-    /// `[markup] allowed-attributes`. Empty strings are ignored (matches
-    /// the Python behaviour of `getlist` returning `['']` for blank config).
-    pub fn with_allowlist(extra_tags: &[String], extra_attrs: &[String]) -> Self {
-        Self {
-            extra_tags: extra_tags
-                .iter()
-                .filter(|t| !t.is_empty())
-                .cloned()
-                .collect(),
-            extra_attrs: extra_attrs
-                .iter()
-                .filter(|a| !a.is_empty())
-                .cloned()
-                .collect(),
+    /// Build a renderer from the `[markup]` and `[markup.mistune]` config.
+    ///
+    /// Fails for the `misaka` renderer and for mistune plugins we have no
+    /// equivalent for, rather than rendering comments differently from
+    /// isso.
+    pub fn from_config(markup: &crate::config::Markup) -> anyhow::Result<Self> {
+        match markup.renderer.as_str() {
+            "mistune" => {}
+            "misaka" => anyhow::bail!("[markup] renderer = misaka is not supported; use mistune"),
+            other => anyhow::bail!(
+                "Invalid renderer value: {other}. Set to either `mistune` or `misaka`."
+            ),
+        }
+        let mut options = Options::empty();
+        for plugin in &markup.mistune_plugins {
+            options |= plugin_option(plugin)
+                .ok_or_else(|| anyhow::anyhow!("unsupported mistune plugin: {plugin}"))?;
+        }
+        let has_plugin = |name: &str| markup.mistune_plugins.iter().any(|p| p == name);
+        let mut script_patterns = Vec::new();
+        if has_plugin("superscript") {
+            script_patterns.push(r"\^(?P<sup>\S+?)\^");
+        }
+        if has_plugin("subscript") {
+            script_patterns.push(r"~(?P<sub>\S+?)~");
+        }
+        let script_regex = (!script_patterns.is_empty())
+            .then(|| Regex::new(&script_patterns.join("|")).expect("static regex compiles"));
+        let mut hard_wrap = false;
+        for parameter in &markup.mistune_parameters {
+            match parameter.as_str() {
+                "hard_wrap" => hard_wrap = true,
+                // isso always escapes raw HTML, whether or not this is listed.
+                "escape" => {}
+                // isso passes nothing but hard_wrap on to mistune either.
+                other => tracing::warn!("ignoring unknown mistune parameter: {other}"),
+            }
+        }
+
+        let extra_tags: HashSet<String> = markup
+            .allowed_elements
+            .iter()
+            .filter(|t| !t.is_empty())
+            .cloned()
+            .collect();
+        let mut extra_attrs: HashSet<String> = markup
+            .allowed_attributes
+            .iter()
+            .filter(|a| !a.is_empty())
+            .cloned()
+            .collect();
+        // If images are allowed, their source has to be as well.
+        if extra_tags.contains("img") {
+            extra_attrs.insert("src".into());
+        }
+        Ok(Self {
+            options,
+            hard_wrap,
+            script_regex,
+            extra_tags,
+            extra_attrs,
             code_class_regex: Regex::new("^language-[a-zA-Z0-9]{1,20}$")
                 .expect("static regex compiles"),
-        }
+        })
     }
 
     pub fn render(&self, text: &str) -> String {
-        // Step 1: Markdown -> HTML. pulldown-cmark by default passes raw HTML
-        // through; ammonia is our XSS defence, so we don't double-escape here.
-        let mut opts = Options::empty();
-        opts.insert(Options::ENABLE_STRIKETHROUGH);
-        opts.insert(Options::ENABLE_TABLES);
-        opts.insert(Options::ENABLE_SMART_PUNCTUATION);
-        let parser = Parser::new_ext(text, opts);
         let mut rendered = String::new();
-        html::push_html(&mut rendered, parser);
+        html::push_html(&mut rendered, self.markdown_events(text).into_iter());
 
-        // Step 2: sanitise, then add rel=nofollow noopener on links.
-        let cleaned = apply_link_rel(&self.sanitize(&rendered));
+        // Like isso, wrap in <p>...</p> before sanitising; the sanitiser's
+        // HTML parser then splits paragraphs around block elements.
+        let wrapped = wrap_paragraph(rendered);
+        escape_text_quotes(&apply_link_rel(&self.sanitize(&wrapped)))
+    }
 
-        // Step 3: wrap in <p>…</p> if it isn't already (frontend invariant).
-        wrap_paragraph(cleaned)
+    /// Parse `text` into the event stream mistune would have rendered.
+    fn markdown_events<'a>(&self, text: &'a str) -> Vec<Event<'a>> {
+        let mut out = Vec::new();
+        // Adjacent text events are merged so the sub/superscript patterns
+        // can see a whole run of text.
+        let mut pending = String::new();
+        let mut in_code_block = false;
+        for (event, range) in Parser::new_ext(text, self.options).into_offset_iter() {
+            let source = &text[range];
+            match &event {
+                // mistune doesn't decode entity references; with escaping on,
+                // `&amp;` shows up literally.
+                Event::Text(t) if !in_code_block && source.starts_with('&') && **t != *source => {
+                    pending.push_str(source);
+                    continue;
+                }
+                Event::Text(t) if !in_code_block => {
+                    pending.push_str(t);
+                    continue;
+                }
+                // With hard_wrap, mistune's line break rule wins over the
+                // backslash one, keeping the backslash.
+                Event::HardBreak if self.hard_wrap && source.starts_with('\\') => {
+                    pending.push('\\');
+                }
+                Event::Start(Tag::Subscript) | Event::End(TagEnd::Subscript) => {
+                    pending.push('~');
+                    continue;
+                }
+                _ => {}
+            }
+            self.flush_text(&mut pending, &mut out);
+            out.push(match event {
+                Event::Start(Tag::CodeBlock(kind)) => {
+                    in_code_block = true;
+                    Event::Start(Tag::CodeBlock(kind))
+                }
+                Event::End(TagEnd::CodeBlock) => {
+                    in_code_block = false;
+                    Event::End(TagEnd::CodeBlock)
+                }
+                // Raw HTML becomes text so that it gets escaped, like
+                // mistune's `escape=True`.
+                Event::Html(html) | Event::InlineHtml(html) => Event::Text(html),
+                Event::SoftBreak if self.hard_wrap => Event::HardBreak,
+                Event::Start(Tag::Link {
+                    link_type,
+                    dest_url,
+                    title,
+                    id,
+                }) => Event::Start(Tag::Link {
+                    link_type,
+                    dest_url: sanitize_url(dest_url),
+                    title,
+                    id,
+                }),
+                Event::Start(Tag::Image {
+                    link_type,
+                    dest_url,
+                    title,
+                    id,
+                }) => Event::Start(Tag::Image {
+                    link_type,
+                    dest_url: sanitize_url(dest_url),
+                    title,
+                    id,
+                }),
+                other => other,
+            });
+        }
+        self.flush_text(&mut pending, &mut out);
+        out
+    }
+
+    /// Emit the merged text run, with mistune's sub/superscript applied.
+    fn flush_text<'a>(&self, pending: &mut String, out: &mut Vec<Event<'a>>) {
+        if pending.is_empty() {
+            return;
+        }
+        let text = std::mem::take(pending);
+        let Some(regex) = &self.script_regex else {
+            out.push(Event::Text(text.into()));
+            return;
+        };
+        let mut last = 0;
+        for caps in regex.captures_iter(&text) {
+            let whole = caps.get(0).expect("group 0 always matches");
+            let (tag, inner) = match (caps.name("sup"), caps.name("sub")) {
+                (Some(inner), _) => ("sup", inner),
+                (None, Some(inner)) => ("sub", inner),
+                (None, None) => unreachable!("one alternative always matches"),
+            };
+            if whole.start() > last {
+                out.push(Event::Text(text[last..whole.start()].to_string().into()));
+            }
+            out.push(Event::Html(CowStr::from(format!("<{tag}>"))));
+            out.push(Event::Text(inner.as_str().to_string().into()));
+            out.push(Event::Html(CowStr::from(format!("</{tag}>"))));
+            last = whole.end();
+        }
+        if last < text.len() {
+            out.push(Event::Text(text[last..].to_string().into()));
+        }
     }
 
     fn sanitize(&self, html: &str) -> String {
@@ -118,6 +287,10 @@ impl Renderer {
         for t in &self.extra_tags {
             tags.insert(t.as_str());
         }
+        // Not in isso's allowlist, but html5lib re-inserts the `<tr>` it
+        // implies around table cells before bleach sees them, so isso's
+        // tables keep their rows.
+        tags.insert("tr");
 
         let mut tag_attrs: HashMap<&str, HashSet<&str>> = HashMap::new();
         // `rel` is allowed through so a caller-supplied value survives to the
@@ -145,6 +318,8 @@ impl Renderer {
             // matches isso/html/__init__.py.
             .link_rel(None)
             .url_relative(UrlRelative::PassThrough)
+            // bleach's default protocol allowlist.
+            .url_schemes(["http", "https", "mailto"].into_iter().collect())
             // `code class="language-xxx"` is allowed only when the value
             // matches bleach's language-<alnum> pattern.
             .attribute_filter(move |element, attribute, value| {
@@ -159,6 +334,67 @@ impl Renderer {
                 }
             });
         builder.clean(html).to_string()
+    }
+}
+
+/// Write `"` in text as `&quot;`, as mistune's escaping does and bleach
+/// preserves. The input is trusted ammonia output, where attribute values
+/// are always double-quoted and `<` in text is always escaped.
+fn escape_text_quotes(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let (mut in_tag, mut in_value) = (false, false);
+    for ch in html.chars() {
+        match ch {
+            '"' if !in_tag => {
+                out.push_str("&quot;");
+                continue;
+            }
+            '"' => in_value = !in_value,
+            '<' if !in_tag => in_tag = true,
+            '>' if in_tag && !in_value => in_tag = false,
+            _ => {}
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// mistune's `sanitize_url`: links and images pointing anywhere but a safe
+/// protocol, a few image `data:` types or a relative URL are replaced by
+/// `#harmful-link`.
+fn sanitize_url(url: CowStr<'_>) -> CowStr<'_> {
+    const SAFE_PROTOCOLS: &[&str] = &[
+        "http:", "https:", "mailto:", "tel:", "ftp:", "ftps:", "irc:", "ircs:",
+    ];
+    const GOOD_DATA_PROTOCOLS: &[&str] = &[
+        "data:image/gif;",
+        "data:image/png;",
+        "data:image/jpeg;",
+        "data:image/webp;",
+    ];
+    // mistune percent-decodes up to three times to catch `javascript%3A`.
+    let mut decoded = url.to_string();
+    for _ in 0..3 {
+        let next = urlencoding::decode(&decoded)
+            .map(|d| d.into_owned())
+            .unwrap_or_else(|_| decoded.clone());
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
+    let normalized = decoded.to_lowercase();
+    let normalized = normalized.trim_start();
+    let safe = SAFE_PROTOCOLS.iter().any(|p| normalized.starts_with(p))
+        || GOOD_DATA_PROTOCOLS
+            .iter()
+            .any(|p| normalized.starts_with(p))
+        || normalized.starts_with(['/', '#', '?'])
+        || !normalized.split('/').next().unwrap_or("").contains(':');
+    if safe {
+        url
+    } else {
+        "#harmful-link".into()
     }
 }
 
@@ -295,7 +531,7 @@ fn wrap_paragraph(mut s: String) -> String {
     while s.ends_with('\n') {
         s.pop();
     }
-    if !(s.starts_with("<p>") && s.ends_with("</p>")) {
+    if !(s.starts_with("<p>") || s.ends_with("</p>")) {
         s = format!("<p>{s}</p>");
     }
     s
@@ -304,6 +540,12 @@ fn wrap_paragraph(mut s: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Expected outputs below were produced by isso's Python renderer
+    /// (mistune + bleach) with the same configuration.
+    fn renderer(ini: &str) -> Renderer {
+        Renderer::from_config(&crate::config::Config::parse(ini).unwrap().markup).unwrap()
+    }
 
     #[test]
     fn plain_text_gets_p_wrapper() {
@@ -322,49 +564,44 @@ mod tests {
     }
 
     #[test]
-    fn raw_script_tags_are_stripped() {
+    fn raw_html_is_escaped() {
         // The critical XSS invariant. If this test ever regresses, a
         // comment containing <script> would execute in the reader's browser.
         let r = Renderer::new();
-        let got = r.render("<script>alert(1)</script>hello");
-        assert_eq!(got, "<p>hello</p>");
-    }
-
-    #[test]
-    fn raw_onload_handler_is_stripped() {
-        let r = Renderer::new();
-        let got = r.render("<p onclick=\"alert(1)\">x</p>");
-        assert_eq!(got, "<p>x</p>");
-    }
-
-    #[test]
-    fn img_tag_is_stripped_by_default() {
-        let r = Renderer::new();
-        let got = r.render("<img src=\"bad\">hello");
-        assert_eq!(got, "<p>hello</p>");
-    }
-
-    #[test]
-    fn img_tag_allowed_when_configured() {
-        // The operator opts into `img` + `src` via `[markup] allowed-elements`
-        // and `allowed-attributes`. Python adds `src` automatically if `img`
-        // is allowed without `src`; we leave that to the caller for now.
-        let r = Renderer::with_allowlist(&["img".into()], &["src".into()]);
-        let got = r.render("<img src=\"cat.jpg\">hello");
-        // Note: pulldown-cmark wraps inline HTML, then ammonia allows it.
-        assert_eq!(got, "<p><img src=\"cat.jpg\">hello</p>");
-    }
-
-    #[test]
-    fn code_class_language_marker_is_preserved() {
-        // Fenced code block with language info string survives sanitisation
-        // because bleach/ammonia's regex accepts `language-<alnum>`.
-        let r = Renderer::new();
-        let got = r.render("```rust\nfn main() {}\n```");
         assert_eq!(
-            got,
-            "<p><pre><code class=\"language-rust\">fn main() {}\n</code></pre></p>"
+            r.render("<script>alert(1)</script>hello"),
+            "<p>&lt;script&gt;alert(1)&lt;/script&gt;hello</p>"
         );
+        assert_eq!(
+            r.render("<p onclick=\"alert(1)\">x</p>"),
+            "<p>&lt;p onclick=&quot;alert(1)&quot;&gt;x&lt;/p&gt;</p>"
+        );
+        assert_eq!(
+            r.render("<div>\nblock\n</div>"),
+            "<p>&lt;div&gt;\nblock\n&lt;/div&gt;</p>"
+        );
+    }
+
+    #[test]
+    fn img_is_stripped_by_default() {
+        let r = Renderer::new();
+        assert_eq!(r.render("![cat](cat.jpg)"), "<p></p>");
+    }
+
+    #[test]
+    fn img_allowed_when_configured_brings_src() {
+        let r = renderer("[markup]\nallowed-elements = img\n");
+        assert_eq!(r.render("![cat](cat.jpg)"), "<p><img src=\"cat.jpg\"></p>");
+    }
+
+    #[test]
+    fn block_elements_split_the_paragraph_wrapper() {
+        let r = Renderer::new();
+        assert_eq!(
+            r.render("```rust\nfn main() {}\n```"),
+            "<p></p><pre><code class=\"language-rust\">fn main() {}\n</code></pre><p></p>"
+        );
+        assert_eq!(r.render("---"), "<p></p><hr><p></p>");
     }
 
     #[test]
@@ -372,39 +609,137 @@ mod tests {
         // Anything that doesn't match ^language-[a-zA-Z0-9]{1,20}$ should be
         // dropped, per isso/html/__init__.py::allow_attribute_class.
         let r = Renderer::new();
-        let got = r.render("<code class=\"evil attr\">x</code>");
-        assert_eq!(got, "<p><code>x</code></p>");
+        assert_eq!(
+            r.sanitize("<code class=\"evil attr\">x</code>"),
+            "<code>x</code>"
+        );
+    }
+
+    #[test]
+    fn hard_wrap_turns_newlines_into_breaks() {
+        let r = Renderer::new();
+        assert_eq!(
+            r.render("line one\nline two"),
+            "<p>line one<br>\nline two</p>"
+        );
+        assert_eq!(r.render("a\\\nb"), "<p>a\\<br>\nb</p>");
+
+        let r = renderer("[markup.mistune]\nparameters = escape\n");
+        assert_eq!(r.render("line one\nline two"), "<p>line one\nline two</p>");
+        assert_eq!(r.render("a\\\nb"), "<p>a<br>\nb</p>");
+    }
+
+    #[test]
+    fn subscript_and_superscript_match_mid_word() {
+        let r = Renderer::new();
+        assert_eq!(
+            r.render("H~2~O and x^2^"),
+            "<p>H<sub>2</sub>O and x<sup>2</sup></p>"
+        );
+        assert_eq!(r.render("a ^b c^ d"), "<p>a ^b c^ d</p>");
+        assert_eq!(r.render("`x^2^`"), "<p><code>x^2^</code></p>");
+        assert_eq!(
+            r.render("```\nH~2~O\n```"),
+            "<p></p><pre><code>H~2~O\n</code></pre><p></p>"
+        );
+    }
+
+    #[test]
+    fn strikethrough_needs_double_tilde() {
+        let r = renderer("[markup.mistune]\nplugins = strikethrough\n");
+        assert_eq!(r.render("~~gone~~"), "<p><del>gone</del></p>");
+        assert_eq!(r.render("~kept~"), "<p>~kept~</p>");
+    }
+
+    #[test]
+    fn no_smart_punctuation() {
+        let r = Renderer::new();
+        assert_eq!(
+            r.render("\"quoted\" -- dash... & < >"),
+            "<p>&quot;quoted&quot; -- dash... &amp; &lt; &gt;</p>"
+        );
+    }
+
+    #[test]
+    fn entities_are_not_decoded() {
+        let r = Renderer::new();
+        assert_eq!(
+            r.render("&amp; &copy; &#169;"),
+            "<p>&amp;amp; &amp;copy; &amp;#169;</p>"
+        );
+    }
+
+    #[test]
+    fn tables_need_the_table_plugin() {
+        let table = "| a | b |\n|---|---|\n| 1 | 2 |";
+        assert_eq!(
+            Renderer::new().render(table),
+            "<p>| a | b |<br>\n|---|---|<br>\n| 1 | 2 |</p>"
+        );
+        let r = renderer("[markup.mistune]\nplugins = table\n");
+        assert_eq!(
+            r.render(table),
+            "<p></p><table><thead><tr><th>a</th><th>b</th></tr></thead><tbody>\n\
+             <tr><td>1</td><td>2</td></tr>\n</tbody></table><p></p>"
+        );
+    }
+
+    #[test]
+    fn harmful_links_are_neutralised() {
+        let r = Renderer::new();
+        for link in [
+            "[x](javascript:alert(1))",
+            "[x](JaVaScRiPt%3Aalert(1))",
+            "[x](file:///etc/passwd)",
+            "[x](data:text/html,x)",
+            "[x](ssh://a)",
+        ] {
+            assert_eq!(
+                r.render(link),
+                "<p><a href=\"#harmful-link\" rel=\"nofollow noopener\">x</a></p>",
+                "{link}"
+            );
+        }
+        assert_eq!(
+            r.render("[x](/rel)"),
+            "<p><a href=\"/rel\" rel=\"nofollow noopener\">x</a></p>"
+        );
+    }
+
+    #[test]
+    fn unsupported_renderer_or_plugin_is_an_error() {
+        let parse = |ini| Renderer::from_config(&crate::config::Config::parse(ini).unwrap().markup);
+        assert_eq!(
+            parse("[markup]\nrenderer = misaka\n")
+                .err()
+                .unwrap()
+                .to_string(),
+            "[markup] renderer = misaka is not supported; use mistune"
+        );
+        assert_eq!(
+            parse("[markup.mistune]\nplugins = math\n")
+                .err()
+                .unwrap()
+                .to_string(),
+            "unsupported mistune plugin: math"
+        );
     }
 
     #[test]
     fn existing_rel_values_are_preserved() {
-        // A caller-supplied rel (allowed via `allowed-attributes`) is kept and
-        // our tokens are appended, matching the set_links callback. `me` is a
-        // valid rel value frontends may emit for self-links.
-        let r = Renderer::with_allowlist(&[], &["rel".into()]);
-        let got = r.render("<a href=\"x\" rel=\"me\">x</a>");
         assert_eq!(
-            got,
-            "<p><a href=\"x\" rel=\"me nofollow noopener\">x</a></p>"
+            apply_link_rel("<a href=\"x\" rel=\"me\">x</a>"),
+            "<a href=\"x\" rel=\"me nofollow noopener\">x</a>"
         );
     }
 
     #[test]
     fn existing_rel_tokens_are_not_duplicated() {
-        // If the author already set nofollow, we must not add it twice
+        // If nofollow is already set, it must not be added twice
         // (case-insensitive), per set_links.
-        let r = Renderer::with_allowlist(&[], &["rel".into()]);
-        let got = r.render("<a href=\"x\" rel=\"NoFollow\">x</a>");
-        assert_eq!(got, "<p><a href=\"x\" rel=\"NoFollow noopener\">x</a></p>");
-    }
-
-    #[test]
-    fn plain_link_gets_nofollow_noopener() {
-        let r = Renderer::new();
-        let got = r.render("<a href=\"https://example.com\">x</a>");
         assert_eq!(
-            got,
-            "<p><a href=\"https://example.com\" rel=\"nofollow noopener\">x</a></p>"
+            apply_link_rel("<a href=\"x\" rel=\"NoFollow\">x</a>"),
+            "<a href=\"x\" rel=\"NoFollow noopener\">x</a>"
         );
     }
 
@@ -426,8 +761,10 @@ mod tests {
     }
 
     #[test]
-    fn pulldown_strikethrough_renders() {
-        let r = Renderer::new();
-        assert_eq!(r.render("~~gone~~"), "<p><del>gone</del></p>");
+    fn quotes_in_attributes_are_left_alone() {
+        assert_eq!(
+            escape_text_quotes("<a href=\"x>y\" title=\"t\">\"q\"</a>"),
+            "<a href=\"x>y\" title=\"t\">&quot;q&quot;</a>"
+        );
     }
 }
