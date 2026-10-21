@@ -34,6 +34,10 @@
     --isso-comment-divider-color: rgba(0, 0, 0, 0.1);
     --isso-page-author-suffix-color: #2c2c2c;
     --isso-target-fade-background-color: #eee5a1;
+
+    --isso-error-text-color: #a94442;
+    --isso-error-background-color: #f2dede;
+    --isso-error-border-color: #ebccd1;
 }
 
 /* ========================================================================== */
@@ -252,6 +256,14 @@ h4.isso-thread-heading {
     position: relative;
     bottom: 1px;
     margin-left: 0;
+}
+.isso-postbox-error {
+    margin: .3em 0;
+    padding: .4em .8em;
+    border-radius: 3px;
+    color: var(--isso-error-text-color);
+    background-color: var(--isso-error-background-color);
+    border: 1px solid var(--isso-error-border-color);
 }
 .isso-notification-section {
     font-size: 0.90em;

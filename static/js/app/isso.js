@@ -17,7 +17,7 @@ var Postbox = function(parent) {
         el = $.htmlify(template.render("postbox", {
         "author":  JSON.parse(localStorage.getItem("isso-author")),
         "email":   JSON.parse(localStorage.getItem("isso-email")),
-        "website": JSON.parse(localStorage.getItem("isso-website")),
+        "website": config["website-field"] !== false ? JSON.parse(localStorage.getItem("isso-website")) : null,
         "preview": ''
     }));
 
@@ -94,6 +94,16 @@ var Postbox = function(parent) {
     // If replied to a comment, remove form completely.
     $("[type=submit]", el).on("click", function(event) {
         edit();
+        var errorEl = $(".isso-postbox-error", el);
+        var clearError = function() {
+            errorEl.textContent = "";
+            errorEl.obj.hidden = true;
+        };
+        var showError = function(reasonKey) {
+            errorEl.textContent = i18n.lookup(reasonKey) || i18n.translate("guard-error");
+            errorEl.obj.hidden = false;
+        };
+        clearError();
         if (! el.validate()) {
             return;
         }
@@ -103,7 +113,8 @@ var Postbox = function(parent) {
 
         var author = $("[name=author]", el).value || null,
             email = $("[name=email]", el).value || null,
-            website = $("[name=website]", el).value || null;
+            websiteEl = config["website-field"] !== false ? $('[name=website]', el) : null,
+            website = websiteEl ? websiteEl.value || null : null;
 
         try {
             localStorage.setItem("isso-author", JSON.stringify(author));
@@ -119,6 +130,7 @@ var Postbox = function(parent) {
             }).then(
                 function(comment) {
                     $(".isso-textarea", el).value = "";
+                    clearError();
                     insert({ comment, scrollIntoView: true, offset: 0 });
 
                     if (parent !== null) {
@@ -130,11 +142,13 @@ var Postbox = function(parent) {
                 function(err) {
                     console.error(err);
                     submitButton.disabled = false;
+                    showError("guard-" + (err && err.reason));
                 }
             );
         } catch (err) {
             console.error(err);
             submitButton.disabled = false;
+            showError("guard-error");
         }
     });
 

@@ -173,6 +173,7 @@ async fn get_config_returns_public_knobs() {
                 "reply-to-self": false,
                 "require-email": false,
                 "require-author": false,
+                "website-field": true,
                 "reply-notifications": false,
                 "gravatar": false,
                 "feed": false,
@@ -209,6 +210,7 @@ async fn get_config_emits_avatar_false_only_when_gravatar_on() {
                 "reply-to-self": false,
                 "require-email": false,
                 "require-author": false,
+                "website-field": true,
                 "reply-notifications": false,
                 "gravatar": true,
                 "avatar": false,
@@ -314,6 +316,7 @@ async fn get_empty_thread_returns_empty_replies() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
     let j = body_json(resp).await;
     assert_eq!(j["id"], Value::Null);
     assert_eq!(j["total_replies"], json!(0));
@@ -515,6 +518,7 @@ async fn view_accepts_cookie_signed_for_that_comment() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
     let j = body_json(resp).await;
     assert_eq!(j["id"], json!(1));
 }
@@ -546,8 +550,6 @@ async fn moderate_activate_flips_mode_to_accepted() {
     // then hit /id/:id/activate/:key with a key signed for that id.
     let state = test_state().await;
     let key = state.signer.sign(&1_i64).unwrap();
-    let signer_key = key.clone();
-    let app = router(state.clone());
 
     // Moderation is only enabled when [moderation] enabled=true — without it
     // POST /new returns mode=1. For the test, insert a pending comment directly.
@@ -564,20 +566,10 @@ async fn moderate_activate_flips_mode_to_accepted() {
     .await
     .unwrap();
 
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/id/1/activate/{signer_key}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = moderate(&state, "activate", &key).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = String::from_utf8(body_bytes(resp).await).unwrap();
-    assert_eq!(body, "Comment has been activated");
+    // JSON object keys are strings; one comment is now in mode 1.
+    assert_eq!(body_json(resp).await, json!({"counts": {"1": 1}}));
 
     // Mode must have moved 2 -> 1.
     let mode: i64 = sqlx::query_scalar("SELECT mode FROM comments WHERE id = 1")
@@ -585,6 +577,37 @@ async fn moderate_activate_flips_mode_to_accepted() {
         .await
         .unwrap();
     assert_eq!(mode, 1);
+
+    // Activating again is idempotent.
+    let resp = moderate(&state, "activate", &key).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await, json!({"counts": {"1": 1}}));
+}
+
+async fn moderate(state: &AppState, action: &str, key: &str) -> axum::response::Response {
+    router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/id/1/{action}/{key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn moderate_delete_returns_remaining_counts() {
+    let state = test_state().await;
+    let key = state.signer.sign(&1_i64).unwrap();
+    insert_comment(&state, "doomed").await;
+
+    let resp = moderate(&state, "delete", &key).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // No references remain, so the comment is gone and every mode is empty.
+    assert_eq!(body_json(resp).await, json!({"counts": {}}));
 }
 
 #[tokio::test]
@@ -1093,4 +1116,117 @@ async fn post_count_returns_parallel_list() {
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp).await;
     assert_eq!(j, json!([1, 0]));
+}
+
+async fn insert_comment(state: &AppState, text: &str) {
+    sqlx::query("INSERT OR IGNORE INTO threads (id, uri, title) VALUES (1, '/t', 'T')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (tid, parent, created, mode, remote_addr, text, voters, notification) \
+         VALUES (1, NULL, 1.0, 1, '127.0.0.0', ?, zeroblob(256), 0)",
+    )
+    .bind(text)
+    .execute(&state.db)
+    .await
+    .unwrap();
+}
+
+async fn send_with_cookie(state: &AppState, method: &str, id: i64, cookie: &str) -> StatusCode {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(format!("/id/{id}?plain=1"))
+        .header(header::COOKIE, format!("{id}={cookie}"));
+    let body = if method == "PUT" {
+        req = req.header(header::CONTENT_TYPE, "application/json");
+        Body::from(serde_json::to_vec(&json!({"text": "Hijacked"})).unwrap())
+    } else {
+        Body::empty()
+    };
+    router(state.clone())
+        .oneshot(req.body(body).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn edit_cookie_of_foreign_shape_is_rejected() {
+    // The signer is shared with the admin session, moderation and
+    // unsubscribe tokens, so payloads of another shape must be refused.
+    let state = test_state().await;
+    insert_comment(&state, "Lorem ipsum ...").await;
+    for payload in [
+        json!({"logged": true}),
+        json!(1),
+        json!(["unsubscribe", "bob@example.org"]),
+        json!("nope"),
+        json!([]),
+    ] {
+        let token = state.signer.sign(&payload).unwrap();
+        for method in ["GET", "PUT", "DELETE"] {
+            assert_eq!(
+                send_with_cookie(&state, method, 1, &token).await,
+                StatusCode::FORBIDDEN,
+                "{method} with payload {payload}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn edit_cookie_for_missing_comment_is_rejected() {
+    let state = test_state().await;
+    let token = state.signer.sign(&json!([99, "deadbeef"])).unwrap();
+    for method in ["GET", "PUT", "DELETE"] {
+        assert_eq!(
+            send_with_cookie(&state, method, 99, &token).await,
+            StatusCode::NOT_FOUND,
+            "{method}"
+        );
+    }
+}
+
+async fn post_new(state: &AppState, body: Value) -> axum::response::Response {
+    router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/new?uri=/guarded")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn guard_rejection_reports_reason() {
+    let state = test_state().await;
+    let comment = json!({"text": "Lorem ipsum", "title": "Guarded"});
+    // The default ratelimit allows two comments per minute.
+    for _ in 0..2 {
+        assert_eq!(
+            post_new(&state, comment.clone()).await.status(),
+            StatusCode::CREATED
+        );
+    }
+    let resp = post_new(&state, comment).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(resp).await, json!({"reason": "ratelimit"}));
+}
+
+#[tokio::test]
+async fn guard_rejection_reports_missing_email() {
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.guard.require_email = true;
+        c
+    });
+    let resp = post_new(&state, json!({"text": "Lorem ipsum", "title": "Guarded"})).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(resp).await, json!({"reason": "require-email"}));
 }

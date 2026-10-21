@@ -11,6 +11,13 @@ module.exports = {
     "postbox-submit": "Submit",
     "postbox-notification": "Subscribe to email notification of replies",
 
+    "guard-error": "Your comment could not be posted.",
+    "guard-ratelimit": "You are commenting too quickly. Please wait a moment and try again.",
+    "guard-direct-reply": "You have posted too many top-level comments on this thread.",
+    "guard-reply-to-self": "You can't reply to your own comment while it can still be edited.",
+    "guard-require-email": "Please provide your email address to post this comment.",
+    "guard-require-author": "Please provide your name to post this comment.",
+
     "num-comments": "One Comment\n{{ n }} Comments",
     "no-comments": "No Comments Yet",
     "atom-feed": "Atom feed",

@@ -1,6 +1,32 @@
 Changelog for Isso
 ==================
 
+0.1.3 (unreleased)
+------------------
+
+- Add a ``[guard] website-field`` option to show or hide the website
+  input in the comment form. (Port of isso#1111, pkvach)
+- Limit every submitted comment field to 65535 characters, not just
+  ``text``, and count the length in characters rather than bytes.
+  (Port of isso#1117, NicolaiSoeborg)
+- Send ``Cache-Control: no-store`` on ``GET /`` and ``GET /id/:id`` so
+  browsers and proxies don't show stale comments. (Port of isso#1110,
+  pkvach)
+- Update the comment count badges in the admin interface after a comment
+  is activated or deleted. ``POST /id/:id/(activate|delete)/:key`` now
+  returns the per-mode counts as JSON instead of a plain-text message.
+  (Port of isso#1113, pkvach)
+- Add a ``webhook`` notification backend that POSTs a signed JSON event
+  for every saved comment. (Port of isso#1123, p1slave)
+- Add ``import --thread-id`` to key Disqus threads by their
+  ``disqus_identifier`` instead of the page URL path. Disqus threads with
+  a missing or self-closing ``<id />`` are now skipped unless
+  ``--empty-id`` is given, as they already were for ``<id></id>``.
+  (Port of isso#1127, pkvach)
+- Show commenters why the guard rejected their comment. ``POST /new``
+  now answers a guard rejection with a JSON ``{"reason": ...}`` body
+  instead of a plain-text message. (Port of isso#1129, pkvach)
+
 0.1.2 (2026-04-23)
 ------------------
 
@@ -488,7 +514,7 @@ Bugs & features:
 - Add the possibility to set CORS Origin through ISSO_CORS_ORIGIN environ variable
 - Add preview button
 - Add Atom feed at /feed?uri={thread-id}
-- Add optionnal gravatar support
+- Add optional gravatar support
 - Add nofollow noopener on links inside comments
 - Add Dockerfile
 - Upgraded to Misaka 2
@@ -540,7 +566,7 @@ Translations:
 -------------------
 
 - fix wrapper attribute when using data-isso-require-mail="true", #238
-- fix reponse for OPTIONS response on Python 3, #242
+- fix response for OPTIONS response on Python 3, #242
 
 
 0.10.3 (2016-02-24)
@@ -828,7 +854,7 @@ optimizations, the JS client now weighs only 40kb (12kb gzipped) – 52kb resp.
 
 - new [markup] section to customize Misaka's Markdown generation (strikethrough,
   superscript and autolink enabled by default). Furthermore, you can now allow
-  certain HTML elemenets and attributes in the generated output, e.g. to enable
+  certain HTML elements and attributes in the generated output, e.g. to enable
   images, set
 
       [markup]
@@ -900,7 +926,7 @@ Major improvements:
 
 Minor improvements:
 
-- move `isso:application` to `isso.run:application` to avoid uneccessary
+- move `isso:application` to `isso.run:application` to avoid unnecessary
   initialization in some cases (change module if you use uWSGI or Gunicorn)
 - add Date header to email notifications, #42
 - check for blank text in new comment, #41
@@ -943,7 +969,7 @@ Major improvements:
 - fix a serious issue with the voters bloomfilter. During an Isso run, the
   ip addresses from all commenters accumulated into the voters bloomfilter
   for new comments. Thus, previous commenters could no longer vote other
-  comments. This fixes the rare occurences of #5.
+  comments. This fixes the rare occurrences of #5.
 
   In addition to this fix, the current voters bloomfilter will be re-initialized
   if you are using Isso 0.4 or below (this is not necessary, but on the

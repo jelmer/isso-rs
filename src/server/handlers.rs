@@ -45,6 +45,8 @@ pub struct PublicConfig {
     require_email: bool,
     #[serde(rename = "require-author")]
     require_author: bool,
+    #[serde(rename = "website-field")]
+    website_field: bool,
     #[serde(rename = "reply-notifications")]
     reply_notifications: bool,
     gravatar: bool,
@@ -64,6 +66,7 @@ impl PublicConfig {
             reply_to_self: state.config.guard.reply_to_self,
             require_email: state.config.guard.require_email,
             require_author: state.config.guard.require_author,
+            website_field: state.config.guard.website_field,
             reply_notifications: state.config.general.reply_notifications,
             gravatar,
             avatar: gravatar.then_some(false),
@@ -112,6 +115,45 @@ mod url_regex_tests {
         for (url, expected) in cases {
             assert_eq!(is_url(url), *expected, "url={url:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::verify_comment;
+
+    #[test]
+    fn rejects_overlong_fields() {
+        let max = "a".repeat(65535);
+        let over = "a".repeat(65536);
+        assert_eq!(verify_comment(Some(&max), None, None, None, None), Ok(()));
+        assert_eq!(
+            verify_comment(Some(&over), None, None, None, None),
+            Err("text is too long (maximum length: 65535)".to_string())
+        );
+        assert_eq!(
+            verify_comment(Some("abc"), Some(&over), None, None, None),
+            Err("author is too long (maximum length: 65535)".to_string())
+        );
+        assert_eq!(
+            verify_comment(Some("abc"), None, None, None, Some(&over)),
+            Err("title is too long (maximum length: 65535)".to_string())
+        );
+    }
+
+    #[test]
+    fn length_is_counted_in_characters() {
+        let max = "\u{e9}".repeat(65535);
+        assert_eq!(verify_comment(Some(&max), None, None, None, None), Ok(()));
+        assert_eq!(
+            verify_comment(Some("\u{e9}\u{e9}"), None, None, None, None),
+            Err("text is too short (minimum length: 3)".to_string())
+        );
+        let email = format!("{}@example.com", "\u{e9}".repeat(200));
+        assert_eq!(
+            verify_comment(Some("abc"), None, None, Some(&email), None),
+            Ok(())
+        );
     }
 }
 
@@ -210,28 +252,41 @@ fn verify_comment(
     author: Option<&str>,
     website: Option<&str>,
     email: Option<&str>,
+    title: Option<&str>,
 ) -> Result<(), String> {
+    const MAX_FIELD_LENGTH: usize = 65535;
     let text = text.ok_or_else(|| "text is missing".to_string())?;
-    if text.trim_end().len() < 3 {
+    let fields = [
+        ("text", Some(text)),
+        ("author", author),
+        ("website", website),
+        ("email", email),
+        ("title", title),
+    ];
+    // Python measures all lengths in code points, not bytes.
+    for (key, value) in fields {
+        if value.is_some_and(|v| v.chars().count() > MAX_FIELD_LENGTH) {
+            return Err(format!(
+                "{key} is too long (maximum length: {MAX_FIELD_LENGTH})"
+            ));
+        }
+    }
+    if text.trim_end().chars().count() < 3 {
         return Err("text is too short (minimum length: 3)".into());
     }
-    if text.len() > 65535 {
-        return Err("text is too long (maximum length: 65535)".into());
-    }
     if let Some(email) = email {
-        if email.len() > 254 {
+        if email.chars().count() > 254 {
             return Err("http://tools.ietf.org/html/rfc5321#section-4.5.3".into());
         }
     }
     if let Some(website) = website {
-        if website.len() > 254 {
+        if website.chars().count() > 254 {
             return Err("arbitrary length limit".into());
         }
         if !website.is_empty() && !is_url(website) {
             return Err("Website not Django-conform".into());
         }
     }
-    let _ = author;
     Ok(())
 }
 
@@ -264,6 +319,10 @@ fn is_url(text: &str) -> bool {
     });
     re.is_match(text)
 }
+
+/// Sent on successful comment listings so browsers and proxies don't
+/// serve stale comments.
+const NO_CACHE_HEADERS: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
 
 fn now_unix() -> f64 {
     SystemTime::now()
@@ -352,6 +411,7 @@ pub async fn new_comment(
         body.author.as_deref(),
         body.website.as_deref(),
         body.email.as_deref(),
+        body.title.as_deref(),
     )
     .map_err(ApiError::BadRequest)?;
 
@@ -434,7 +494,13 @@ pub async fn new_comment(
     match guard.validate(&state.db, thread.id, now, &input).await {
         Ok(()) => {}
         Err(GuardError::Db(e)) => return Err(ApiError::Internal(e.into())),
-        Err(other) => return Err(ApiError::Forbidden(other.to_string())),
+        Err(rejected) => {
+            tracing::info!("{remote_addr}: comment rejected by guard: {rejected}");
+            let reason = rejected
+                .reason()
+                .expect("non-db guard errors have a reason");
+            return Ok((StatusCode::FORBIDDEN, Json(json!({ "reason": reason }))).into_response());
+        }
     }
 
     let new_c = NewComment {
@@ -625,7 +691,7 @@ pub async fn fetch(
         "replies": replies,
         "config": PublicConfig::from_state(&state),
     });
-    Ok((StatusCode::OK, Json(body)).into_response())
+    Ok((StatusCode::OK, NO_CACHE_HEADERS, Json(body)).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -671,7 +737,7 @@ pub async fn view(
     let render_html = q.plain.as_deref().unwrap_or("0") == "0";
     let body = serde_json::to_value(render_comment(comment, &state, render_html))
         .map_err(|e| ApiError::Internal(e.into()))?;
-    Ok((StatusCode::OK, Json(body)).into_response())
+    Ok((StatusCode::OK, NO_CACHE_HEADERS, Json(body)).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -708,6 +774,7 @@ pub async fn edit(
         body.text.as_deref(),
         body.author.as_deref(),
         body.website.as_deref(),
+        None,
         None,
     )
     .map_err(ApiError::BadRequest)?;
@@ -960,7 +1027,7 @@ pub async fn moderate_post(
     match action.as_str() {
         "activate" => {
             if item.mode == 1 {
-                return Ok((StatusCode::OK, "Already activated").into_response());
+                return moderation_counts(&state).await;
             }
             cmt::activate(&state.db, signed_id).await?;
             // Refresh after the update and fire the activate notification.
@@ -969,11 +1036,11 @@ pub async fn moderate_post(
                     .notifier
                     .comment_activated(&state.db, &thread, &activated);
             }
-            Ok((StatusCode::OK, "Comment has been activated").into_response())
+            moderation_counts(&state).await
         }
         "delete" => {
             cmt::delete(&state.db, signed_id).await?;
-            Ok((StatusCode::OK, "Comment has been deleted").into_response())
+            moderation_counts(&state).await
         }
         "edit" => {
             let body = body.ok_or_else(|| {
@@ -983,6 +1050,7 @@ pub async fn moderate_post(
                 body.0.text.as_deref(),
                 body.0.author.as_deref(),
                 body.0.website.as_deref(),
+                None,
                 None,
             )
             .map_err(ApiError::BadRequest)?;
@@ -1005,6 +1073,17 @@ pub async fn moderate_post(
         }
         other => Err(ApiError::BadRequest(format!("unknown action: {other}"))),
     }
+}
+
+/// Number of comments per mode after a moderation action, so the admin UI
+/// can update its badges. Modes without comments are omitted.
+async fn moderation_counts(state: &AppState) -> Result<Response, ApiError> {
+    let counts: serde_json::Map<String, Value> = cmt::count_by_mode(&state.db)
+        .await?
+        .into_iter()
+        .map(|(mode, n)| (mode.to_string(), json!(n)))
+        .collect();
+    Ok((StatusCode::OK, Json(json!({ "counts": counts }))).into_response())
 }
 
 fn moderate_verify(state: &AppState, id: i64, key: &str) -> Result<i64, ApiError> {

@@ -36,6 +36,7 @@ pub async fn dispatch(
     dump: &Path,
     pool: &SqlitePool,
     empty_id: bool,
+    use_thread_id: bool,
 ) -> anyhow::Result<ImportReport> {
     let payload =
         fs::read_to_string(dump).map_err(|e| anyhow::anyhow!("reading {}: {e}", dump.display()))?;
@@ -48,7 +49,11 @@ pub async fn dispatch(
         other => anyhow::bail!("unknown import kind: {other}"),
     };
     match resolved {
-        Kind::Disqus => Disqus::new(&payload, empty_id).migrate(pool).await,
+        Kind::Disqus => {
+            Disqus::new(&payload, empty_id, use_thread_id)
+                .migrate(pool)
+                .await
+        }
         Kind::WordPress => WordPress::new(&payload).migrate(pool).await,
         Kind::Generic => Generic::new(&payload)?.migrate(pool).await,
     }
@@ -99,11 +104,18 @@ const DISQUS_INTERNALS: &str = "http://disqus.com/disqus-internals";
 pub struct Disqus<'a> {
     xml: &'a str,
     empty_id: bool,
+    use_thread_id: bool,
 }
 
 impl<'a> Disqus<'a> {
-    pub fn new(xml: &'a str, empty_id: bool) -> Self {
-        Self { xml, empty_id }
+    /// With `use_thread_id`, threads are keyed by their `<id>`
+    /// (disqus_identifier) when set, rather than by the page URL path.
+    pub fn new(xml: &'a str, empty_id: bool, use_thread_id: bool) -> Self {
+        Self {
+            xml,
+            empty_id,
+            use_thread_id,
+        }
     }
 
     pub async fn migrate(&self, pool: &SqlitePool) -> anyhow::Result<ImportReport> {
@@ -125,16 +137,19 @@ impl<'a> Disqus<'a> {
                 continue;
             }
             // Python skips duplicate empty-id threads unless --empty-id is set.
-            if thread.has_empty_id && !self.empty_id {
+            if thread.id.is_none() && !self.empty_id {
                 continue;
             }
             let Some(posts) = by_thread.get(&thread.internals_id) else {
                 continue;
             };
-            let path = url::Url::parse(&thread.link)
-                .ok()
-                .map(|u| u.path().to_string())
-                .unwrap_or_else(|| thread.link.clone());
+            let path = match (&thread.id, self.use_thread_id) {
+                (Some(id), true) => id.clone(),
+                _ => url::Url::parse(&thread.link)
+                    .ok()
+                    .map(|u| u.path().to_string())
+                    .unwrap_or_else(|| thread.link.clone()),
+            };
             if path.is_empty() {
                 continue;
             }
@@ -182,7 +197,8 @@ struct DisqusThread {
     internals_id: String,
     link: String,
     title: String,
-    has_empty_id: bool,
+    /// The `<id>` (disqus_identifier); `None` when missing or empty.
+    id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,7 +250,7 @@ fn parse_disqus(xml: &str) -> anyhow::Result<DisqusParsed> {
                             internals_id: internals.clone(),
                             link: String::new(),
                             title: String::new(),
-                            has_empty_id: false,
+                            id: None,
                         });
                     }
                     "post" => {
@@ -294,9 +310,8 @@ fn parse_disqus(xml: &str) -> anyhow::Result<DisqusParsed> {
                         "title" if local_path.ends_with("thread/title") => {
                             thread.title = text.clone();
                         }
-                        // An empty <id/> flags a "duplicate empty" thread.
-                        "id" if local_path.ends_with("thread/id") && text.is_empty() => {
-                            thread.has_empty_id = true;
+                        "id" if local_path.ends_with("thread/id") => {
+                            thread.id = Some(text.trim().to_string()).filter(|s| !s.is_empty());
                         }
                         _ => {}
                     }
@@ -807,7 +822,7 @@ mod tests {
   </post>
 </disqus>"##;
         let pool = crate::db::open(":memory:").await.unwrap();
-        let report = Disqus::new(xml, false).migrate(&pool).await.unwrap();
+        let report = Disqus::new(xml, false, false).migrate(&pool).await.unwrap();
         assert_eq!(report.threads_inserted, 1);
         assert_eq!(report.comments_inserted, 2);
         assert_eq!(report.orphan_count, 0);

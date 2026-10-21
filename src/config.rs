@@ -20,6 +20,7 @@ pub struct Config {
     pub markup: Markup,
     pub hash: Hash,
     pub rss: Rss,
+    pub webhook: Webhook,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +85,7 @@ pub struct Guard {
     pub reply_to_self: bool,
     pub require_author: bool,
     pub require_email: bool,
+    pub website_field: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +107,13 @@ pub struct Hash {
 pub struct Rss {
     pub base: String,
     pub limit: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct Webhook {
+    pub urls: Vec<String>,
+    pub secret: String,
+    pub timeout: u64,
 }
 
 impl Default for Config {
@@ -154,6 +163,7 @@ impl Default for Config {
                 reply_to_self: false,
                 require_author: false,
                 require_email: false,
+                website_field: true,
             },
             markup: Markup {
                 renderer: "mistune".into(),
@@ -173,6 +183,11 @@ impl Default for Config {
             rss: Rss {
                 base: String::new(),
                 limit: 100,
+            },
+            webhook: Webhook {
+                urls: Vec::new(),
+                secret: String::new(),
+                timeout: 10,
             },
         }
     }
@@ -207,11 +222,7 @@ impl Config {
                 self.general.name = v.into();
             }
             if let Some(v) = s.get("host") {
-                self.general.hosts = v
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect();
+                self.general.hosts = split_lines(v);
             }
             if let Some(v) = s.get("max-age") {
                 self.general.max_age = parse_timedelta(v)?;
@@ -268,11 +279,7 @@ impl Config {
                 self.server.profile = parse_bool(v)?;
             }
             if let Some(v) = s.get("trusted-proxies") {
-                self.server.trusted_proxies = v
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect();
+                self.server.trusted_proxies = split_lines(v);
             }
             if let Some(v) = s.get("samesite") {
                 let v = v.trim();
@@ -327,6 +334,9 @@ impl Config {
             if let Some(v) = s.get("require-email") {
                 self.guard.require_email = parse_bool(v)?;
             }
+            if let Some(v) = s.get("website-field") {
+                self.guard.website_field = parse_bool(v)?;
+            }
         }
         if let Some(s) = ini.section(Some("markup")) {
             if let Some(v) = s.get("renderer") {
@@ -363,8 +373,27 @@ impl Config {
                 self.rss.limit = v.parse()?;
             }
         }
+        if let Some(s) = ini.section(Some("webhook")) {
+            if let Some(v) = s.get("url") {
+                self.webhook.urls = split_lines(v);
+            }
+            if let Some(v) = s.get("secret") {
+                self.webhook.secret = v.into();
+            }
+            if let Some(v) = s.get("timeout") {
+                self.webhook.timeout = v.parse()?;
+            }
+        }
         Ok(())
     }
+}
+
+/// Python's `getiter`: one item per non-blank line.
+fn split_lines(v: &str) -> Vec<String> {
+    v.lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 fn split_commas(v: &str) -> Vec<String> {
@@ -601,6 +630,27 @@ mod tests {
         assert_eq!(c.hash.salt, "Eech7co8Ohloopo9Ol6baimi");
         assert_eq!(c.hash.algorithm, "pbkdf2");
         assert_eq!(c.rss.limit, 100);
+    }
+
+    #[test]
+    fn webhook_section_is_parsed() {
+        let cfg = Config::parse(
+            "[webhook]\nurl =\n    https://a.example/hook\n    https://b.example/hook\nsecret = s3cret\ntimeout = 5\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.webhook.urls,
+            vec!["https://a.example/hook", "https://b.example/hook"]
+        );
+        assert_eq!(cfg.webhook.secret, "s3cret");
+        assert_eq!(cfg.webhook.timeout, 5);
+    }
+
+    #[test]
+    fn website_field_defaults_to_shown() {
+        assert!(Config::default().guard.website_field);
+        let cfg = Config::parse("[guard]\nwebsite-field = false\n").unwrap();
+        assert!(!cfg.guard.website_field);
     }
 
     #[test]

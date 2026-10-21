@@ -35,6 +35,23 @@ impl std::fmt::Display for GuardError {
     }
 }
 
+impl GuardError {
+    /// Machine-readable code sent to the client as `{"reason": ...}`.
+    /// These are a contract with the JS client, which looks up the
+    /// `"guard-" + reason` i18n key. `None` for errors that aren't a
+    /// rejection by the guard.
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            GuardError::Ratelimit => Some("ratelimit"),
+            GuardError::DirectReplyLimit => Some("direct-reply"),
+            GuardError::ReplyToSelfBlocked => Some("reply-to-self"),
+            GuardError::AuthorRequired => Some("require-author"),
+            GuardError::EmailRequired => Some("require-email"),
+            GuardError::Db(_) => None,
+        }
+    }
+}
+
 impl std::error::Error for GuardError {}
 
 impl From<sqlx::Error> for GuardError {

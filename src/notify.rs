@@ -1,6 +1,7 @@
-//! Email + stdout notifications, mirroring isso/ext/notifications.py.
+//! Email, stdout and webhook notifications, mirroring
+//! isso/ext/notifications.py.
 //!
-//! Two notification backends, both enabled by `[general] notify`:
+//! Three notification backends, all enabled by `[general] notify`:
 //!
 //! - **stdout**: log-line emission for new / edit / delete / activate events
 //!   with Delete/Activate URLs the operator can click through — useful for a
@@ -8,6 +9,8 @@
 //! - **smtp**: admin email on new-comment; reply email to parent-comment
 //!   subscribers on activation. Delivery is best-effort: we fire-and-forget
 //!   over a tokio task and log on failure.
+//! - **webhook**: POST a `comment.created` JSON event to every `[webhook] url`
+//!   for each saved comment, signed with HMAC-SHA256 when `secret` is set.
 //!
 //! The admin notification includes signed `Delete` / `Activate` URLs; the
 //! reply notification includes a signed `Unsubscribe` URL *and* a
@@ -15,16 +18,19 @@
 //! expose a one-click unsubscribe.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use hmac::{Hmac, Mac};
 use lettre::message::header::{ContentType, HeaderName, HeaderValue};
 use lettre::message::{Mailbox, Message};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use serde_json::json;
+use sha2::Sha256;
 use sqlx::SqlitePool;
 
-use crate::config::{Config, Smtp};
+use crate::config::{Config, Smtp, Webhook};
 use crate::db::comments::{self as cmt, Comment};
 use crate::db::threads::Thread;
 use crate::signer::Signer;
@@ -39,7 +45,11 @@ pub struct Notifier {
 
 impl Notifier {
     pub fn new(config: Arc<Config>, signer: Arc<Signer>) -> Self {
-        Self { config, signer }
+        let notifier = Self { config, signer };
+        if notifier.wants_webhook() && notifier.config.webhook.urls.is_empty() {
+            tracing::warn!("webhook notifications are enabled without webhook URLs");
+        }
+        notifier
     }
 
     fn wants_admin_smtp(&self) -> bool {
@@ -52,6 +62,10 @@ impl Notifier {
 
     fn wants_reply_smtp(&self) -> bool {
         self.config.general.reply_notifications
+    }
+
+    fn wants_webhook(&self) -> bool {
+        self.config.general.notify.iter().any(|n| n == "webhook")
     }
 
     fn wants_stdout(&self) -> bool {
@@ -90,6 +104,11 @@ impl Notifier {
         }
         if self.wants_reply_smtp() && comment.mode == 1 {
             self.spawn_reply_fanout(pool.clone(), thread.clone(), comment.clone());
+        }
+        if self.wants_webhook() && !self.config.webhook.urls.is_empty() {
+            let config = Arc::clone(&self.config);
+            let body = webhook_body(thread, comment);
+            tokio::spawn(async move { send_webhook(&config.webhook, &body).await });
         }
     }
 
@@ -349,6 +368,115 @@ fn build_transport(smtp: &Smtp) -> anyhow::Result<AsyncSmtpTransport<Tokio1Execu
     Ok(builder.build())
 }
 
+#[derive(serde::Serialize)]
+struct WebhookPayload<'a> {
+    event: &'static str,
+    thread: WebhookThread<'a>,
+    comment: WebhookComment<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct WebhookThread<'a> {
+    id: i64,
+    uri: &'a str,
+    title: Option<&'a str>,
+}
+
+#[derive(serde::Serialize)]
+struct WebhookComment<'a> {
+    id: i64,
+    parent: Option<i64>,
+    created: f64,
+    modified: Option<f64>,
+    mode: i64,
+    text: &'a str,
+    author: Option<&'a str>,
+    website: Option<&'a str>,
+}
+
+/// Payload of the `comment.created` webhook event. Email, IP address and
+/// voters are deliberately left out.
+///
+/// The body is signed, so it is produced byte-for-byte like Python's
+/// `json.dumps(payload, separators=(",", ":"))`: keys in insertion order
+/// and non-ASCII characters escaped.
+pub fn webhook_body(thread: &Thread, comment: &Comment) -> Vec<u8> {
+    let payload = WebhookPayload {
+        event: "comment.created",
+        thread: WebhookThread {
+            id: thread.id,
+            uri: &thread.uri,
+            title: thread.title.as_deref(),
+        },
+        comment: WebhookComment {
+            id: comment.id,
+            parent: comment.parent,
+            created: comment.created,
+            modified: comment.modified,
+            mode: comment.mode,
+            text: &comment.text,
+            author: comment.author.as_deref(),
+            website: comment.website.as_deref(),
+        },
+    };
+    let json = serde_json::to_string(&payload).expect("payload serializes");
+    ensure_ascii(&json).into_bytes()
+}
+
+/// Escape non-ASCII characters as `\uXXXX` (surrogate pairs outside the
+/// BMP), like Python's `json.dumps` default `ensure_ascii=True`. Non-ASCII
+/// can only occur inside JSON strings, so this is safe on serialized output.
+fn ensure_ascii(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for ch in json.chars() {
+        if ch.is_ascii() {
+            out.push(ch);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in ch.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    out
+}
+
+/// `sha256=` followed by the hex HMAC-SHA256 of `body`.
+pub fn webhook_signature(secret: &str, body: &[u8]) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(body);
+    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+}
+
+/// POST `body` to every configured URL. Failures are logged per URL and
+/// don't stop delivery to the others.
+pub async fn send_webhook(cfg: &Webhook, body: &[u8]) {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(cfg.timeout))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("unable to build webhook client: {e}");
+            return;
+        }
+    };
+    for url in &cfg.urls {
+        let mut req = client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header("X-Isso-Event", "comment.created")
+            .body(body.to_vec());
+        if !cfg.secret.is_empty() {
+            req = req.header("X-Isso-Signature", webhook_signature(&cfg.secret, body));
+        }
+        if let Err(e) = req.send().await.and_then(|r| r.error_for_status()) {
+            tracing::warn!("unable to deliver comment webhook to {url}: {e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +633,105 @@ mod tests {
                 "security={sec}: {:?}",
                 build_transport(&smtp).err()
             );
+        }
+    }
+
+    #[test]
+    fn webhook_body_omits_private_fields() {
+        let body = webhook_body(&sample_thread(), &sample_comment());
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload,
+            json!({
+                "event": "comment.created",
+                "thread": {"id": 3, "uri": "/thread", "title": "Post Title"},
+                "comment": {
+                    "id": 42,
+                    "parent": null,
+                    "created": 1700000000.0,
+                    "modified": null,
+                    "mode": 2,
+                    "text": "hello",
+                    "author": "jane",
+                    "website": "https://example.com",
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn webhook_body_matches_python_json_dumps() {
+        let mut comment = sample_comment();
+        comment.text = "caf\u{e9} \u{1f600}".into();
+        // json.dumps(payload, separators=(",", ":")) for the same payload.
+        let expected = concat!(
+            r#"{"event":"comment.created","#,
+            r#""thread":{"id":3,"uri":"/thread","title":"Post Title"},"#,
+            r#""comment":{"id":42,"parent":null,"created":1700000000.0,"modified":null,"#,
+            r#""mode":2,"text":"caf\u00e9 \ud83d\ude00","author":"jane","#,
+            r#""website":"https://example.com"}}"#,
+        );
+        assert_eq!(
+            String::from_utf8(webhook_body(&sample_thread(), &comment)).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn webhook_signature_matches_hmac_sha256() {
+        // python3 -c 'import hmac,hashlib;print(hmac.new(b"key",b"body",hashlib.sha256).hexdigest())'
+        assert_eq!(
+            webhook_signature("key", b"body"),
+            "sha256=515aae133b435d4000956731f68ae5cf5eb85d4f0dc6a546d2bfcd3595ec1ae1"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_webhook_posts_to_every_url() {
+        use axum::extract::State;
+        use axum::http::HeaderMap;
+        use tokio::sync::mpsc;
+
+        type Received = (String, HeaderMap, Vec<u8>);
+        let (tx, mut rx) = mpsc::unbounded_channel::<Received>();
+        let app = axum::Router::new()
+            .route(
+                "/:name",
+                axum::routing::post(
+                    |State(tx): State<mpsc::UnboundedSender<Received>>,
+                     axum::extract::Path(name): axum::extract::Path<String>,
+                     headers: HeaderMap,
+                     body: axum::body::Bytes| async move {
+                        tx.send((name, headers, body.to_vec())).unwrap();
+                    },
+                ),
+            )
+            .with_state(tx);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let cfg = Webhook {
+            urls: vec![
+                format!("http://{addr}/first"),
+                format!("http://{addr}/second"),
+            ],
+            secret: "test-secret".into(),
+            timeout: 5,
+        };
+        let body = webhook_body(&sample_thread(), &sample_comment());
+        send_webhook(&cfg, &body).await;
+
+        for expected in ["first", "second"] {
+            let (name, headers, received) = rx.recv().await.unwrap();
+            assert_eq!(name, expected);
+            assert_eq!(headers["content-type"], "application/json");
+            assert_eq!(headers["x-isso-event"], "comment.created");
+            assert_eq!(
+                headers["x-isso-signature"],
+                webhook_signature("test-secret", &body).as_str()
+            );
+            assert_eq!(received, body);
         }
     }
 }

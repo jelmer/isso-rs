@@ -74,7 +74,7 @@ host
     your website, you have to "whitelist" your website(s).
 
     I recommend the first value to be a non-SSL website that is used as fallback
-    if Firefox users (and only those) supress their HTTP referer completely.
+    if Firefox users (and only those) suppress their HTTP referer completely.
 
     .. code-block:: ini
 
@@ -103,7 +103,36 @@ notify
         Send notifications via SMTP on new comments with activation (if
         moderated) and deletion links.
 
+    webhook
+        POST a JSON event to an HTTP endpoint for every saved comment.
+
     Default: ``stdout``
+
+Webhook
+-------
+
+Add ``webhook`` to ``general.notify`` to receive a ``comment.created`` event
+after each comment is saved, including pending comments. The payload contains
+the event, thread ID/URI/title, and comment ID, parent, timestamps, mode,
+text, author, and website; it excludes email address, IP address, and voting
+data.
+
+.. code-block:: ini
+
+    [general]
+    notify = webhook
+
+    [webhook]
+    url =
+        https://example.com/hooks/isso
+        https://example.net/hooks/isso
+    secret = a-long-random-secret
+    timeout = 10
+
+Requests are POSTed as JSON with ``X-Isso-Event: comment.created``. When
+``secret`` is set, ``X-Isso-Signature`` is ``sha256=`` followed by the
+lowercase hexadecimal HMAC-SHA256 of the raw request body. Each configured
+URL receives the same event.
 
 reply-notifications
     Allow users to request E-mail notifications for replies to their post.
@@ -337,7 +366,8 @@ Guard
 -----
 
 Enable basic spam protection features, e.g. rate-limit per IP address (``/24``
-for IPv4, ``/48`` for IPv6).
+for IPv4, ``/48`` for IPv6). When a comment is rejected by one of the checks
+below, the commenter is shown an explanatory message in the comment form.
 
 .. code-block:: ini
 
@@ -348,6 +378,7 @@ for IPv4, ``/48`` for IPv6).
     reply-to-self = false
     require-author = false
     require-email = false
+    website-field = true
 
 enabled
     Enable guard, recommended in production. Not useful for debugging
@@ -384,6 +415,14 @@ require-email
     performed on the provided value.
 
     Default: ``false``
+
+website-field
+    Whether to show the website input field in the comment form. Set to
+    ``false`` to hide the website field entirely (no CSS hacks needed).
+
+    Default: ``true``
+
+    .. versionadded:: 0.14.1
 
 .. _configure-markup:
 
