@@ -417,7 +417,7 @@ pub async fn new_comment(
 
     let text = body.text.expect("verified above");
     let author = body.author.map(|a| html_escape(&a, false));
-    let email = body.email;
+    let email = body.email.map(|e| html_escape(&e, false));
     let website = body.website.map(|w| {
         let escaped = html_escape(&w, true);
         if escaped.starts_with("http://") || escaped.starts_with("https://") {

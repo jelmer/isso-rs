@@ -1230,3 +1230,19 @@ async fn guard_rejection_reports_missing_email() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert_eq!(body_json(resp).await, json!({"reason": "require-email"}));
 }
+
+#[tokio::test]
+async fn email_is_html_escaped_before_storing() {
+    let state = test_state().await;
+    let resp = post_new(
+        &state,
+        json!({"text": "Lorem ipsum", "title": "T", "email": "a&b<c>@example.com"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let email: String = sqlx::query_scalar("SELECT email FROM comments WHERE id = 1")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(email, "a&amp;b&lt;c&gt;@example.com");
+}
