@@ -73,7 +73,7 @@
             </a>
           {% endfor %}
           <div class="search">
-            <form action="/admin/" method="get">
+            <form action="{{isso_host_script}}/admin/" method="get">
               <input type="hidden" name="mode" value="0" />
                 <label class="search-label">Search by URL
                   <div class="search-tooltip" onclick="toggleTooltip(this)"><span class="search-tooltip-icon">?</span>

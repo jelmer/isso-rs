@@ -1284,8 +1284,8 @@ use minijinja::context;
 ///
 /// If `[admin] enabled = false` the endpoint instead renders the `disabled`
 /// template so the operator sees a useful message rather than a 404.
-pub async fn login_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    render_login_or_disabled(&state, &headers)
+pub async fn login_get(State(state): State<AppState>) -> Response {
+    render_login_or_disabled(&state)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1293,17 +1293,13 @@ pub struct LoginForm {
     password: Option<String>,
 }
 
-pub async fn login_post(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Form(form): Form<LoginForm>,
-) -> Response {
+pub async fn login_post(State(state): State<AppState>, Form(form): Form<LoginForm>) -> Response {
     if !state.config.admin.enabled {
-        return render_login_or_disabled(&state, &headers);
+        return render_login_or_disabled(&state);
     }
     let supplied = form.password.unwrap_or_default();
     if supplied.is_empty() || supplied != state.config.admin.password {
-        return render_login_or_disabled(&state, &headers);
+        return render_login_or_disabled(&state);
     }
     // Sign an admin-session payload; the admin endpoint accepts tokens
     // valid for 24 hours (Python's max_age=60*60*24).
@@ -1313,8 +1309,6 @@ pub async fn login_post(
             return ApiError::Internal(anyhow::anyhow!("sign: {e}")).into_response();
         }
     };
-    // Compute the redirect target: current URL with "/login/" → "/admin/".
-    let location = redirect_to_admin(&headers);
     let cookie = super::build_cookie("admin-session", &token, 60 * 60 * 24, true, &state.config);
     let x_cookie = super::build_cookie(
         "isso-admin-session",
@@ -1324,12 +1318,11 @@ pub async fn login_post(
         &state.config,
     );
 
+    // Relative to /login/, so it stays under any reverse-proxy prefix.
     let mut resp = (StatusCode::SEE_OTHER, "").into_response();
     resp.headers_mut().insert(
         header::LOCATION,
-        location
-            .parse()
-            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("/admin/")),
+        axum::http::HeaderValue::from_static("../admin/"),
     );
     resp.headers_mut().append(header::SET_COOKIE, cookie);
     resp.headers_mut().append("X-Set-Cookie", x_cookie);
@@ -1349,30 +1342,14 @@ pub async fn logout(State(state): State<AppState>) -> Response {
     let mut resp = (StatusCode::SEE_OTHER, "").into_response();
     resp.headers_mut().insert(
         header::LOCATION,
-        axum::http::HeaderValue::from_static("/login/"),
+        axum::http::HeaderValue::from_static("../login/"),
     );
     resp.headers_mut().append(header::SET_COOKIE, cookie);
     resp.headers_mut().append("X-Set-Cookie", x_cookie);
     resp
 }
 
-fn redirect_to_admin(headers: &HeaderMap) -> String {
-    // Use the Host + protocol the request came in on; fall back to "/admin/".
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    // We always redirect to /admin/ at the same host.
-    if host.is_empty() {
-        "/admin/".into()
-    } else {
-        // Browsers accept a relative URL here; keep it path-only so behind a
-        // reverse proxy with path rewriting we don't strand the user.
-        "/admin/".into()
-    }
-}
-
-fn render_login_or_disabled(state: &AppState, headers: &HeaderMap) -> Response {
+fn render_login_or_disabled(state: &AppState) -> Response {
     let template = if state.config.admin.enabled {
         "login.html"
     } else {
@@ -1381,15 +1358,21 @@ fn render_login_or_disabled(state: &AppState, headers: &HeaderMap) -> Response {
     render_admin_template(
         state,
         template,
-        context! { isso_host_script => isso_host_script(state, headers) },
+        context! { isso_host_script => isso_host_script(state) },
     )
 }
 
-fn isso_host_script(state: &AppState, headers: &HeaderMap) -> String {
-    // Use the proxy-aware URL resolver so deployments behind a reverse
-    // proxy at a sub-path (X-Forwarded-Prefix / X-Script-Name) link to the
-    // correct external URL rather than the internal one.
-    super::external_url_prefix(headers, &state.config)
+/// Base URL the admin and login pages use for their assets, forms and API
+/// calls: `[server] public-endpoint` like in isso, otherwise `..`. These
+/// pages are only served at `<prefix>/admin/` and `<prefix>/login/`, so `..`
+/// is the prefix even behind a reverse proxy that doesn't say what it is.
+fn isso_host_script(state: &AppState) -> String {
+    let public = state.config.server.public_endpoint.trim_end_matches('/');
+    if public.is_empty() {
+        "..".into()
+    } else {
+        public.into()
+    }
 }
 
 fn render_admin_template(
@@ -1440,7 +1423,7 @@ pub async fn admin(
     headers: HeaderMap,
     Query(q): Query<AdminQuery>,
 ) -> Response {
-    let isso_host = isso_host_script(&state, &headers);
+    let isso_host = isso_host_script(&state);
     if !state.config.admin.enabled {
         return render_admin_template(
             &state,

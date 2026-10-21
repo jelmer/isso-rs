@@ -966,7 +966,13 @@ async fn admin_login_right_password_sets_session_cookie_and_redirects() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/admin/");
+    assert_eq!(
+        resolve(
+            "http://localhost/login/",
+            resp.headers()[header::LOCATION].to_str().unwrap()
+        ),
+        "http://localhost/admin/"
+    );
     // Set-Cookie was stamped and verifies.
     let set_cookie = resp
         .headers()
@@ -1008,7 +1014,13 @@ async fn logout_expires_session_cookie_and_redirects_to_login() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/login/");
+    assert_eq!(
+        resolve(
+            "http://localhost/logout/",
+            resp.headers()[header::LOCATION].to_str().unwrap()
+        ),
+        "http://localhost/login/"
+    );
     let set_cookie = resp
         .headers()
         .get(header::SET_COOKIE)
@@ -1283,4 +1295,97 @@ async fn email_is_html_escaped_before_storing() {
         .await
         .unwrap();
     assert_eq!(email, "a&amp;b&lt;c&gt;@example.com");
+}
+
+/// Where a browser that is at `page` (the external URL, under a reverse
+/// proxy that strips `/isso`) ends up when following `link`.
+fn resolve(page: &str, link: &str) -> String {
+    url::Url::parse(page)
+        .unwrap()
+        .join(link)
+        .unwrap()
+        .to_string()
+}
+
+fn admin_state(state: &mut AppState, public_endpoint: &str) {
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.admin.enabled = true;
+        c.admin.password = "hunter2".into();
+        c.server.public_endpoint = public_endpoint.into();
+        c
+    });
+}
+
+#[tokio::test]
+async fn login_redirects_under_proxy_prefix() {
+    let mut state = test_state().await;
+    admin_state(&mut state, "https://example.com/isso");
+    let resp = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login/")
+                .header(header::HOST, "127.0.0.1:8080")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("password=hunter2"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers()[header::LOCATION].to_str().unwrap();
+    assert_eq!(
+        resolve("https://example.com/isso/login/", location),
+        "https://example.com/isso/admin/"
+    );
+}
+
+#[tokio::test]
+async fn logout_redirects_under_proxy_prefix() {
+    let resp = router(test_state().await)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/logout/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let location = resp.headers()[header::LOCATION].to_str().unwrap();
+    assert_eq!(
+        resolve("https://example.com/isso/logout/", location),
+        "https://example.com/isso/login/"
+    );
+}
+
+#[tokio::test]
+async fn login_form_posts_under_proxy_prefix() {
+    // No public-endpoint and no forwarding headers: all isso sees is the
+    // Host header.
+    let mut state = test_state().await;
+    admin_state(&mut state, "");
+    let resp = router(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/")
+                .header(header::HOST, "example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    let action = body
+        .split("<form method=\"POST\" action=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("login form present")
+        .replace("&#x2f;", "/");
+    assert_eq!(
+        resolve("https://example.com/isso/admin/", &action),
+        "https://example.com/isso/login/"
+    );
 }
