@@ -94,6 +94,16 @@ var Postbox = function(parent) {
     // If replied to a comment, remove form completely.
     $("[type=submit]", el).on("click", function(event) {
         edit();
+        var errorEl = $(".isso-postbox-error", el);
+        var clearError = function() {
+            errorEl.textContent = "";
+            errorEl.obj.hidden = true;
+        };
+        var showError = function(reasonKey) {
+            errorEl.textContent = i18n.lookup(reasonKey) || i18n.translate("guard-error");
+            errorEl.obj.hidden = false;
+        };
+        clearError();
         if (! el.validate()) {
             return;
         }
@@ -120,6 +130,7 @@ var Postbox = function(parent) {
             }).then(
                 function(comment) {
                     $(".isso-textarea", el).value = "";
+                    clearError();
                     insert({ comment, scrollIntoView: true, offset: 0 });
 
                     if (parent !== null) {
@@ -131,11 +142,13 @@ var Postbox = function(parent) {
                 function(err) {
                     console.error(err);
                     submitButton.disabled = false;
+                    showError("guard-" + (err && err.reason));
                 }
             );
         } catch (err) {
             console.error(err);
             submitButton.disabled = false;
+            showError("guard-error");
         }
     });
 

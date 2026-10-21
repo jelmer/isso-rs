@@ -494,7 +494,13 @@ pub async fn new_comment(
     match guard.validate(&state.db, thread.id, now, &input).await {
         Ok(()) => {}
         Err(GuardError::Db(e)) => return Err(ApiError::Internal(e.into())),
-        Err(other) => return Err(ApiError::Forbidden(other.to_string())),
+        Err(rejected) => {
+            tracing::info!("{remote_addr}: comment rejected by guard: {rejected}");
+            let reason = rejected
+                .reason()
+                .expect("non-db guard errors have a reason");
+            return Ok((StatusCode::FORBIDDEN, Json(json!({ "reason": reason }))).into_response());
+        }
     }
 
     let new_c = NewComment {

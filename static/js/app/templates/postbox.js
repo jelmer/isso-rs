@@ -32,6 +32,7 @@ var html = function (globals) {
       + "<label for='isso-postbox-website'>" + i18n('postbox-website') + "</label>"
       + "<input id='isso-postbox-website' type='text' name='website' placeholder='" + i18n('postbox-website-placeholder') + "' value='" + (website ? website : '') + "' />"
     + "</p>" : "")
+    + "<div class='isso-postbox-error' role='alert' hidden></div>"
     + "<p class='isso-post-action'>"
       + "<input type='submit' value='" + i18n('postbox-submit') + "' />"
     + "</p>"

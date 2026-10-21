@@ -23,6 +23,9 @@ Changelog for Isso
   a missing or self-closing ``<id />`` are now skipped unless
   ``--empty-id`` is given, as they already were for ``<id></id>``.
   (Port of isso#1127, pkvach)
+- Show commenters why the guard rejected their comment. ``POST /new``
+  now answers a guard rejection with a JSON ``{"reason": ...}`` body
+  instead of a plain-text message. (Port of isso#1129, pkvach)
 
 0.1.2 (2026-04-23)
 ------------------

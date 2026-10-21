@@ -366,7 +366,8 @@ Guard
 -----
 
 Enable basic spam protection features, e.g. rate-limit per IP address (``/24``
-for IPv4, ``/48`` for IPv6).
+for IPv4, ``/48`` for IPv6). When a comment is rejected by one of the checks
+below, the commenter is shown an explanatory message in the comment form.
 
 .. code-block:: ini
 

@@ -1187,3 +1187,46 @@ async fn edit_cookie_for_missing_comment_is_rejected() {
         );
     }
 }
+
+async fn post_new(state: &AppState, body: Value) -> axum::response::Response {
+    router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/new?uri=/guarded")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn guard_rejection_reports_reason() {
+    let state = test_state().await;
+    let comment = json!({"text": "Lorem ipsum", "title": "Guarded"});
+    // The default ratelimit allows two comments per minute.
+    for _ in 0..2 {
+        assert_eq!(
+            post_new(&state, comment.clone()).await.status(),
+            StatusCode::CREATED
+        );
+    }
+    let resp = post_new(&state, comment).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(resp).await, json!({"reason": "ratelimit"}));
+}
+
+#[tokio::test]
+async fn guard_rejection_reports_missing_email() {
+    let mut state = test_state().await;
+    state.config = Arc::new({
+        let mut c = (*state.config).clone();
+        c.guard.require_email = true;
+        c
+    });
+    let resp = post_new(&state, json!({"text": "Lorem ipsum", "title": "Guarded"})).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(resp).await, json!({"reason": "require-email"}));
+}

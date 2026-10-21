@@ -54,7 +54,7 @@ var curl = function(method, url, data, resolve, reject) {
 
         if (xhr.status >= 500) {
             if (reject) {
-                reject(xhr.body);
+                reject({ status: xhr.status, body: xhr.responseText });
             }
         } else {
             resolve({status: xhr.status, body: xhr.responseText});
@@ -72,7 +72,7 @@ var curl = function(method, url, data, resolve, reject) {
             }
         };
     } catch (exception) {
-        (reject || console.log)(exception.message);
+        (reject || console.log)({ status: 0, body: exception.message });
     }
 
     xhr.send(data);
@@ -92,14 +92,24 @@ var qs = function(params) {
 
 var create = function(tid, data) {
     var deferred = Q.defer();
+    var handleError = function (rv) {
+        var reason;
+        try {
+            reason = JSON.parse(rv.body).reason;
+        } catch (e) {
+            console.warn("isso: non-JSON error response", e);
+        }
+        deferred.reject({ status: rv.status, reason: reason });
+    };
     curl("POST", endpoint + "/new?" + qs({uri: tid || location()}), JSON.stringify(data),
         function (rv) {
             if (rv.status === 201 || rv.status === 202) {
                 deferred.resolve(JSON.parse(rv.body));
             } else {
-                deferred.reject(rv.body);
+                handleError(rv);
             }
-        });
+        },
+        handleError);
     return deferred.promise;
 };
 
